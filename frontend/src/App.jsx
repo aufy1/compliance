@@ -10,7 +10,6 @@ function App() {
   })
   const [message, setMessage] = useState('')
 
-  // Pobieranie materiałów z backendu po załadowaniu komponentu
   useEffect(() => {
     fetch('/api/materials')
       .then((res) => res.json())
@@ -20,25 +19,23 @@ function App() {
       .catch((err) => console.error("Błąd pobierania materiałów:", err))
   }, [])
 
-  // Obsługa zmian w polach tekstowych
   const handleInputChange = (e) => {
     const { name, value } = e.target
     setFormData((prev) => ({ ...prev, [name]: value }))
   }
 
-  // Obsługa zaznaczania checkboxów (materiałów)
-  const handleMaterialToggle = (material) => {
+  // ZMIANA: Zapisujemy tylko nazwę materiału (string), a nie cały obiekt
+  const handleMaterialToggle = (materialName) => {
     setFormData((prev) => {
-      const isSelected = prev.selected_materials.includes(material)
+      const isSelected = prev.selected_materials.includes(materialName)
       const newMaterials = isSelected
-        ? prev.selected_materials.filter((m) => m !== material)
-        : [...prev.selected_materials, material]
+        ? prev.selected_materials.filter((m) => m !== materialName)
+        : [...prev.selected_materials, materialName]
       
       return { ...prev, selected_materials: newMaterials }
     })
   }
 
-  // Wysyłanie formularza
   const handleSubmit = async (e) => {
     e.preventDefault()
     setMessage('')
@@ -56,7 +53,6 @@ function App() {
       
       if (data.status === 'success') {
         setMessage(data.message)
-        // Czyszczenie formularza po sukcesie
         setFormData({
           product_name: '',
           cable_type: '',
@@ -113,13 +109,14 @@ function App() {
             <p style={{ color: '#888' }}>Brak materiałów w bazie (lub błąd pobierania).</p>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              {/* ZMIANA: iterujemy po obiektach, kluczem jest mat.id (lub mat.name), renderujemy mat.name */}
               {materials.map((mat) => (
-                <label key={mat}>
+                <label key={mat.id || mat.name}>
                   <input 
                     type="checkbox" 
-                    checked={formData.selected_materials.includes(mat)}
-                    onChange={() => handleMaterialToggle(mat)}
-                  /> {mat}
+                    checked={formData.selected_materials.includes(mat.name)}
+                    onChange={() => handleMaterialToggle(mat.name)}
+                  /> {mat.name} {mat.needs_rohs_check ? " (Wymaga RoHS)" : ""}
                 </label>
               ))}
             </div>
