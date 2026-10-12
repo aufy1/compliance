@@ -7,15 +7,21 @@ import { SRCL, UL, cx, keyN } from '../../lib/utils.js';
 import { Modal, TagInput } from '../ui/index.jsx';
 import { input, btnGhost, btnPrimary, btnDanger } from '../ui/styles.js';
 import { useI18n } from '../../lib/i18n-context.js';
+import { reachCompliance, reachVersion } from '../../lib/rcd.js';
 
 let uid = 0;
 const toForm = it => ({
-  i: it.i || '', d: it.d || '', a: it.a || '', sup: it.sup || '', r: it.r || '', reach: it.reach || it.reachStatus || '', dt: it.dt || '',
+  i: it.i || '', d: it.d || '', sup: it.sup || '', r: it.r || '',
+  rc: reachCompliance(it) == null ? '' : String(reachCompliance(it)),
+  rn: reachVersion(it), dt: it.dt || '',
   h: Object.entries(it.h || {}).map(([id, [s, ev]]) => ({ uid: ++uid, id, s, ev: ev || '' })),
   ex: it.ex || [], u: it.u || [], al: it.al || [], w: (it.w || []).join('\n'),
 });
 const fromForm = f => ({
-  i: f.i.trim(), d: f.d, a: f.a, sup: f.sup, r: f.r, reach: f.reach, dt: f.dt,
+  i: f.i.trim(), d: f.d, sup: f.sup, r: f.r,
+  ...(f.rc !== '' ? { rc: f.rc === 'true' } : {}),
+  ...(f.rn.trim() && Number.isFinite(Number(f.rn)) ? { rn: Number(f.rn) } : {}),
+  dt: f.dt,
   h: Object.fromEntries(f.h.filter(x => x.id).map(x => [x.id, [x.s, x.ev.trim()]])),
   ex: f.ex, u: f.u, al: f.al, w: f.w.split('\n').map(s => s.trim()).filter(Boolean),
 });
@@ -55,16 +61,14 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
 
   /* podpowiedzi do pól */
   const lists = useMemo(() => {
-    const a = new Map(), sup = new Map(), r = new Map(), reach = new Map();
+    const sup = new Map(), r = new Map();
     const inc = (m, v) => v && m.set(v, (m.get(v) || 0) + 1);
     Object.values(db.items).forEach(it => {
-      inc(a, it.a);
       inc(sup, it.sup);
       inc(r, it.r);
-      inc(reach, it.reach || it.reachStatus);
     });
     const top = (m, n) => [...m.entries()].sort((x, y) => y[1] - x[1]).slice(0, n).map(x => x[0]);
-    return { a: top(a, 30), sup: top(sup, 400), r: top(r, 25), reach: top(reach, 30) };
+    return { sup: top(sup, 400), r: top(r, 25) };
   }, [db]);
 
   const newKey = keyN(f.i);
@@ -140,10 +144,6 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
             {!isNew && newKey !== editing.key && !clash && f.i && <div className="mt-1 text-[11px] text-amber-400">{tr('zmiana numeru ITEM ({old} → {new})', { old: editing.key, new: newKey })}</div>}
           </div>
           <div className="md:col-span-2">
-            <Label>{tr('Status')}</Label>
-            <input className={input} list="dl-a" value={f.a} onChange={e => set('a')(e.target.value)} placeholder="ACTIVE / INACTIVE / OBS…" />
-          </div>
-          <div className="md:col-span-2">
             <Label hint="yyyy-mm-dd">{tr('Data deklaracji')}</Label>
             <div className="flex gap-1.5">
               <input className={input} value={f.dt} onChange={e => set('dt')(e.target.value)} placeholder="2026-10-12" />
@@ -163,8 +163,17 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
             <input className={input} list="dl-r" value={f.r} onChange={e => set('r')(e.target.value)} placeholder="YES / YES 6(c) / …" />
           </div>
           <div className="md:col-span-3">
-            <Label>{tr('Status REACH')}</Label>
-            <input className={input} list="dl-reach" value={f.reach} onChange={e => set('reach')(e.target.value)} placeholder="e.g. Compliant / SVHC present / Unknown" />
+            <Label>{tr('REACH compliance')}</Label>
+            <select className={input} value={f.rc} onChange={e => set('rc')(e.target.value)}>
+              <option value="">{tr('Unknown')}</option>
+              <option value="true">{tr('Compliant')}</option>
+              <option value="false">{tr('Non-compliant')}</option>
+            </select>
+          </div>
+          <div className="md:col-span-3">
+            <Label>{tr('SVHC list version')}</Label>
+            <input className={input} inputMode="numeric" value={f.rn}
+              onChange={e => set('rn')(e.target.value.replace(/\D/g, ''))} placeholder="e.g. 253" />
           </div>
         </div>
 
@@ -236,10 +245,8 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
           </div>
         </div>
 
-        <datalist id="dl-a">{lists.a.map(v => <option key={v} value={v} />)}</datalist>
         <datalist id="dl-sup">{lists.sup.map(v => <option key={v} value={v} />)}</datalist>
         <datalist id="dl-r">{lists.r.map(v => <option key={v} value={v} />)}</datalist>
-        <datalist id="dl-reach">{lists.reach.map(value => <option key={value} value={value} />)}</datalist>
       </div>
     </Modal>
   );

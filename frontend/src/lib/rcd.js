@@ -51,39 +51,108 @@ export function countHits(db) {
   return c;
 }
 
-export function reachStatus(item, language = 'en') {
-  if (item.reach || item.reachStatus) return item.reach || item.reachStatus;
-  if ((item.w || []).some(warning => /^REACH\s*=\s*NO\b/i.test(warning))) return language === 'en' ? 'No' : 'Nie';
-  if ((item.u || []).includes('svhc')) return language === 'en' ? 'Missing' : 'Brak danych';
-  const hits = Object.keys(item.h || {}).filter(id =>
-    BY_ID[id]?.t?.some(target => target.s === 'svhc' || target.s === 'reach67'),
-  );
-  if (hits.length) {
-    const names = hits.map(id => language === 'en' ? BY_ID[id].en || BY_ID[id].n : BY_ID[id].n);
-    return `${language === 'en' ? 'Related substances recorded' : 'Zapisane substancje powiązane z REACH'}: ${names.join('; ')}`;
-  }
-  return language === 'en' ? 'No recorded REACH-related substances' : 'Brak zapisanych substancji powiązanych z REACH';
+export function reachVersion(item) {
+  const version = item.rn;
+  return version == null ? '' : String(version);
+}
+
+const REACH_STATES = [
+  'compliant_no_svhc',
+  'compliant_svhc',
+  'compliant_unspecified_svhc',
+  'svhc_verify',
+  'non_compliant',
+  'pending_verify',
+  'not_applicable',
+  'no_data',
+  'verify',
+];
+const COMPLIANT_REACH_STATES = new Set([
+  'compliant_no_svhc',
+  'compliant_svhc',
+  'compliant_unspecified_svhc',
+]);
+
+export function reachCompliance(item) {
+  if (typeof item.rc === 'boolean') return item.rc;
+  const state = Number.isInteger(item.rs)
+    ? REACH_STATES[item.rs]
+    : item.re?.s;
+  if (COMPLIANT_REACH_STATES.has(state)) return true;
+  if (state === 'non_compliant') return false;
+  return null;
+}
+
+export function reachLabel(item, language = 'en', includeVersion = true) {
+  const compliant = reachCompliance(item);
+  const label = compliant === true
+    ? (language === 'en' ? 'Compliant' : 'Zgodny')
+    : compliant === false
+      ? (language === 'en' ? 'Non-compliant' : 'Niezgodny')
+      : (language === 'en' ? 'Unknown' : 'Nieznany');
+  const version = includeVersion ? reachVersion(item) : '';
+  return version ? `${label} · SVHC ${version}` : label;
 }
 
 /* ===== BOM ===== */
 export const CRIT = new Set(['dehp', 'cd', 'cr6', 'dp']); // „No” = niezgodność → tylko ręcznie
 
-export function parseBom(text, LOOK) {
-  const out = new Map(), nf = new Map();
+export function parseBom(text, LOOK, { skipDuplicates = true } = {}) {
+  const out = new Map(), nf = new Map(), entries = [];
   text.split(/\r?\n/).forEach(line => {
     if (!line.trim()) return;
-    const cells = line.split('\t').map(c => c.trim()).filter(Boolean);
-    const cand = [...cells, line.trim(), ...line.split(/[\s,;\t]+/)].filter(c => c && c.replace(/[^A-Za-z0-9]/g, '').length >= 4);
+    const trimmedLine = line.trim();
+    const levelMatch = trimmedLine.match(/^(?:(?:__\s*)+)/);
+    const level = levelMatch ? (levelMatch[0].match(/__/g) || []).length : 0;
+    const content = levelMatch ? trimmedLine.slice(levelMatch[0].length).trim() : trimmedLine;
+    const cells = content.split('\t').map(c => c.trim()).filter(Boolean);
+    const cand = [...cells, content, ...content.split(/[\s,;\t]+/)]
+      .filter(c => c && c.replace(/[^A-Za-z0-9]/g, '').length >= 4);
     let hit = null, tok = null;
     for (const c of cand) { const r = LOOK(c); if (r) { hit = r; tok = c; break; } }
+    let entry;
     if (hit) {
-      const e = out.get(hit.k) || { k: hit.k, via: hit.via, tok, n: 0 }; e.n++; out.set(hit.k, e);
+      const existing = out.get(hit.k);
+      if (skipDuplicates && existing) {
+        existing.n++;
+        return;
+      }
+      entry = { k: hit.k, via: hit.via, tok, n: 1, level, found: true };
+      if (!existing) out.set(hit.k, entry);
     } else {
       const c = cells.find(x => /\d/.test(x) && x.replace(/[^A-Za-z0-9]/g, '').length >= 4 && x.length <= 40) || '';
-      if (c) nf.set(c, (nf.get(c) || 0) + 1);
+      if (c) {
+        const existing = nf.get(c);
+        if (skipDuplicates && existing) {
+          existing.n++;
+          return;
+        }
+        entry = { item: c, n: 1, level, found: false };
+        if (!existing) nf.set(c, entry);
+      }
     }
+    if (!entry) return;
+    entries.push(entry);
   });
-  return { found: [...out.values()], nf: [...nf.keys()] };
+  const hierarchy = [];
+  entries.forEach(entry => {
+    let parent = entry.level > 0 ? hierarchy[entry.level - 1] : null;
+    if (!parent && entry.level > 0) {
+      parent = [...hierarchy].reverse().find(candidate => candidate && candidate.level < entry.level) || null;
+    }
+    entry.parent = parent;
+    hierarchy.length = entry.level;
+    hierarchy[entry.level] = entry;
+  });
+  entries.forEach((entry, index) => {
+    entry.hasChildren = (entries[index + 1]?.level ?? -1) > entry.level;
+  });
+  return {
+    found: skipDuplicates ? [...out.values()] : entries.filter(entry => entry.found),
+    nf: (skipDuplicates ? [...nf.values()] : entries.filter(entry => !entry.found)).map(record => record.item),
+    nfRecords: skipDuplicates ? [...nf.values()] : entries.filter(entry => !entry.found),
+    entries,
+  };
 }
 
 export function analyse(parsed, o, db) {
@@ -111,10 +180,10 @@ export function analyse(parsed, o, db) {
 export function bomReport(P, A, language = 'pl') {
   const en = language === 'en';
   const L = [[...(en
-    ? ['ITEM', 'Description', 'Status', 'Supplier', 'Substance', 'Source', 'Evidence', 'RoHS exemptions', 'Missing data', 'Notes']
-    : ['ITEM', 'Opis', 'Status', 'Dostawca', 'Substancja', 'Źródło', 'Dowód', 'Wyjątki RoHS', 'Braki danych', 'Uwagi'])].join('\t')];
+    ? ['ITEM', 'Description', 'Supplier', 'Substance', 'Source', 'Evidence', 'RoHS exemptions', 'Missing data', 'Notes']
+    : ['ITEM', 'Opis', 'Dostawca', 'Substancja', 'Źródło', 'Dowód', 'Wyjątki RoHS', 'Braki danych', 'Uwagi'])].join('\t')];
   A.rows.forEach(r => {
-    const base = [r.it.i, r.it.d || '', r.it.a || '', r.it.sup || ''];
+    const base = [r.it.i, r.it.d || '', r.it.sup || ''];
     const tail = [(r.it.ex || []).join(', '), (r.it.u || []).map(k => UL[k]).join(', '), (r.it.w || []).join(' | ')];
     if (!r.used.length) L.push([...base, '', '', '', ...tail].join('\t'));
     r.used.forEach(([id, s, ev]) => L.push([...base, en ? BY_ID[id].en || BY_ID[id].n : BY_ID[id].n, en ? ({ deklaracja: 'declaration', opis: 'description', wniosek: 'inference', możliwe: 'possible' }[SRCL[s][0]] || SRCL[s][0]) : SRCL[s][0], ev, ...tail].join('\t')));

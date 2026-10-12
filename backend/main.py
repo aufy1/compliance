@@ -22,6 +22,7 @@ BACKUP_PATTERN = re.compile(
     r"^(?:material_db|rcd)_\d{8}_\d{6}_[a-f0-9-]+\.json$"
 )
 LEGACY_BACKUP_PATTERN = re.compile(r"^rcd_\d{8}_\d{6}_[a-f0-9-]+\.json$")
+REMOVED_ITEM_FIELDS = {"a", "rs", "rr", "rv", "re", "reach", "reachStatus"}
 
 app = FastAPI(title="Compliance RCD API")
 database_lock = threading.RLock()
@@ -148,7 +149,13 @@ def validate_item(value: object) -> dict:
         or not item_key(value["i"])
     ):
         raise HTTPException(400, "Rekord musi zawierać niepuste pole ITEM (i).")
-    return value
+    if any(not isinstance(item, dict) for item in [value]):
+        raise HTTPException(400, "Rekord ma nieprawidłowy format.")
+    return {
+        key: field_value
+        for key, field_value in value.items()
+        if key not in REMOVED_ITEM_FIELDS
+    }
 
 
 @app.get("/api/health")
@@ -314,9 +321,18 @@ async def replace_database(request: Request) -> dict:
     with database_lock:
         previous_database = read_database()
         backup_name = backup_before_change(previous_database, force=True)
+        items = {
+            key: {
+                field: value
+                for field, value in item.items()
+                if field not in REMOVED_ITEM_FIELDS
+            }
+            for key, item in body["items"].items()
+        }
         database = {
-            **body,
-            "n": len(body["items"]),
+            **{key: value for key, value in body.items() if key != "reach"},
+            "items": items,
+            "n": len(items),
             "updated": utc_now(),
         }
         write_database(database)

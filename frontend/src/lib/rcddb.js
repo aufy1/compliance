@@ -28,7 +28,7 @@ const RCDDB = (() => {
 
   /* --- mapowanie kolumn po nagłówkach --- */
   const COLS = [
-    ['item', /^item$/], ['desc', /^desc/], ['extra', /extra/], ['active', /active|status/],
+    ['item', /^item$/], ['desc', /^desc/], ['extra', /extra/],
     ['rohs', /^rohs$/], ['phth', /phthal/], ['reach', /^reach/], ['svhc', /candidate|^svhc/],
     ['comments', /comment/], ['date', /data dekl|^date/], ['be', /^be$/], ['pvc', /pvc|sb2o3/],
     ['pip', /^pip/], ['pfas', /pfas/], ['dost', /dostawca|supplier/], ['prod', /producent|manufact/],
@@ -212,7 +212,7 @@ const RCDDB = (() => {
       const r = {}; COLS.forEach(([k]) => r[k] = g(k));
       const cl = classify(r); n++;
       const k = keyN(item);
-      const rec = { i: item, d: r.desc, a: r.active, sup: r.dost || r.prod, r: r.rohs, reach: r.reach, dt: r.date, h: cl.h, ex: cl.ex, u: cl.u, w: cl.w, al: aliases(r.extra) };
+      const rec = { i: item, d: r.desc, sup: r.dost || r.prod, r: r.rohs, dt: r.date, h: cl.h, ex: cl.ex, u: cl.u, w: cl.w, al: aliases(r.extra) };
       if (items[k]) { // duplikat → scal
         const e = items[k];
         e.h = e.h || {}; Object.entries(rec.h).forEach(([id, v]) => add(e.h, id, v[0], v[1]));

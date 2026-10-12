@@ -4,6 +4,7 @@ import { api, backupFileUrl } from '../api.js';
 import { fmtSize } from '../lib/utils.js';
 import { btnGhost, btnPrimary, panel } from '../components/ui/styles.js';
 import { useI18n } from '../lib/i18n-context.js';
+import { reachCompliance } from '../lib/rcd.js';
 
 export default function BackupView({ notify }) {
   const { t, language } = useI18n();
@@ -19,10 +20,10 @@ export default function BackupView({ notify }) {
         ['RECORD_KEY', row => row.key],
         ['ITEM', row => row.item.i],
         ['DESC', row => row.item.d],
-        ['ACTIVE', row => row.item.a],
         [t('Dostawca'), row => row.item.sup],
         ['ROHS', row => row.item.r],
-        ['REACH', row => row.item.reach || row.item.reachStatus],
+        ['REACH_COMPLIANT', row => reachCompliance(row.item)],
+        ['REACH_LIST_VERSION', row => row.item.rn],
         ['DATE', row => row.item.dt],
         ['SUBSTANCES_JSON', row => row.item.h],
         ['EXCEPTIONS_JSON', row => row.item.ex],
@@ -32,7 +33,7 @@ export default function BackupView({ notify }) {
         ['MODIFIED_AT', row => row.item.mod],
         ['DUPLICATES', row => row.item.dup],
       ];
-      const known = new Set(['i', 'd', 'a', 'sup', 'r', 'reach', 'reachStatus', 'dt', 'h', 'ex', 'u', 'w', 'al', 'mod', 'dup']);
+      const known = new Set(['i', 'd', 'a', 'sup', 'r', 'rc', 're', 'rs', 'rn', 'rr', 'rv', 'reach', 'reachStatus', 'dt', 'h', 'ex', 'u', 'w', 'al', 'mod', 'dup']);
       const extraKeys = [...new Set(records.flatMap(([, item]) => Object.keys(item).filter(key => !known.has(key))))].sort();
       const columns = [
         ...preferredColumns,

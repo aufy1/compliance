@@ -163,7 +163,7 @@ export default function BomPanel({ db, sel, onApply, onAddCrit, onEditRecord, on
                   <div className="max-h-96 overflow-auto">
                     <table className="w-full text-xs">
                       <thead className="bg-zinc-900 sticky top-0 text-zinc-500">
-                        <tr className="text-left"><th className="px-2 py-1.5">ITEM</th><th className="px-2 py-1.5">{t('Opis / status')}</th><th className="px-2 py-1.5">{t('Substancje')}</th><th className="px-2 py-1.5">{t('RoHS wyj.')}</th><th className="px-2 py-1.5">{t('Braki')}</th><th /></tr>
+                        <tr className="text-left"><th className="px-2 py-1.5">ITEM</th><th className="px-2 py-1.5">{t('Opis (DESC)')}</th><th className="px-2 py-1.5">{t('Substancje')}</th><th className="px-2 py-1.5">{t('RoHS wyj.')}</th><th className="px-2 py-1.5">{t('Braki')}</th><th /></tr>
                       </thead>
                       <tbody>
                         {A.rows.map(r => (
@@ -172,7 +172,7 @@ export default function BomPanel({ db, sel, onApply, onAddCrit, onEditRecord, on
                               {r.f.via !== 'ITEM' && <div className="text-[10px] text-zinc-500">{r.f.via}: {r.f.tok}</div>}
                               {r.f.n > 1 && <div className="text-[10px] text-zinc-500">×{r.f.n} w BOM</div>}
                             </td>
-                            <td className="px-2 py-1.5 text-zinc-300">{r.it.d || ''}<div className="text-[10px] text-zinc-500">{[r.it.a, r.it.sup, r.it.dt].filter(Boolean).join(' · ')}</div></td>
+                            <td className="px-2 py-1.5 text-zinc-300">{r.it.d || ''}<div className="text-[10px] text-zinc-500">{[r.it.sup, r.it.dt].filter(Boolean).join(' · ')}</div></td>
                             <td className="px-2 py-1.5"><div className="flex flex-wrap gap-0.5">
                               {r.used.map(([id, s, ev]) => (
                                 <Chip key={id} title={SRCL[s][0] + ': ' + ev} className={CRIT.has(id) ? 'bg-red-500/20 text-red-200 ring-red-500/50' : SRCL[s][1]}>{shortName(id)}{s === 'p' ? '?' : ''}</Chip>

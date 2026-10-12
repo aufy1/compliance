@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { FileJson, FileSpreadsheet, Printer, Search } from 'lucide-react';
 import RCDDB from '../../lib/rcddb.js';
-import { parseBom, reachStatus } from '../../lib/rcd.js';
+import { parseBom, reachLabel } from '../../lib/rcd.js';
 import { BY_ID } from '../../lib/substances.js';
 import { Check, Modal } from '../ui/index.jsx';
 import { btnGhost, btnPrimary, input } from '../ui/styles.js';
@@ -24,20 +24,26 @@ function getSubstances(item, language, t) {
   return hits.length ? hits.join('; ') : t('None recorded');
 }
 
-function reportRow(database, record, language, t) {
+function reportRow(database, record, language, t, includeReachVersion) {
   const item = database.items[record.k];
-  if (!item) {
+  const structuralOnly = !record.found && record.hasChildren;
+  if (!record.found || !item) {
     return {
-      ITEM: record.tok || record.k,
-      'REACH status': t('Not found in database'),
-      'RoHS status': t('Not found in database'),
-      'Declaration date': t('Not found in database'),
-      'Substances found': t('Not found in database'),
+      ITEM: record.item || record.tok || record.k,
+      'BOM level': record.level || 0,
+      _found: false,
+      _structuralOnly: structuralOnly,
+      'REACH status': structuralOnly ? '' : t('Not found in database'),
+      'RoHS status': structuralOnly ? '' : t('Not found in database'),
+      'Declaration date': structuralOnly ? '' : t('Not found in database'),
+      'Substances found': structuralOnly ? '' : t('Not found in database'),
     };
   }
   return {
     ITEM: item.i,
-    'REACH status': reachStatus(item, language),
+    'BOM level': record.level || 0,
+    _found: true,
+    'REACH status': reachLabel(item, language, includeReachVersion),
     'RoHS status': item.r || t(missing),
     'Declaration date': item.dt || t(missing),
     'Substances found': getSubstances(item, language, t),
@@ -63,30 +69,31 @@ export default function BatchStatusReport({ db, onClose }) {
   const { t, language } = useI18n();
   const [text, setText] = useState('');
   const [analysedText, setAnalysedText] = useState('');
+  const [includeBomStructure, setIncludeBomStructure] = useState(true);
+  const [skipDuplicates, setSkipDuplicates] = useState(true);
+  const [includeReachVersion, setIncludeReachVersion] = useState(true);
   const [selected, setSelected] = useState(() => Object.fromEntries(FIELDS.map(({ key }) => [key, true])));
   const parsed = useMemo(() => {
     if (!analysedText.trim()) return null;
-    return parseBom(analysedText, RCDDB.index(db));
-  }, [analysedText, db]);
+    return parseBom(analysedText, RCDDB.index(db), { skipDuplicates });
+  }, [analysedText, db, skipDuplicates]);
   const rows = useMemo(() => {
     if (!parsed) return [];
-    return [
-      ...parsed.found.map(record => reportRow(db, record, language, t)),
-      ...parsed.nf.map(item => ({
-        ITEM: item,
-        'REACH status': t('Not found in database'),
-        'RoHS status': t('Not found in database'),
-        'Declaration date': t('Not found in database'),
-        'Substances found': t('Not found in database'),
-      })),
-    ];
-  }, [db, parsed, language, t]);
-  const columns = ['ITEM', ...FIELDS.filter(field => selected[field.key]).map(field => t(field.label))];
+    return parsed.entries.map(record => reportRow(db, record, language, t, includeReachVersion));
+  }, [db, parsed, language, t, includeReachVersion]);
+  const columnKeys = [
+    'ITEM',
+    ...(includeBomStructure ? ['BOM level'] : []),
+    ...FIELDS.filter(field => selected[field.key]).map(field => field.label),
+  ];
+  const columns = columnKeys.map(key => key === 'ITEM' ? key : t(key));
   const reportRows = () => rows.map(row => Object.fromEntries(
-    columns.map((column, index) => {
-      const key = ['ITEM', ...FIELDS.filter(field => selected[field.key]).map(field => field.label)][index];
-      return [column, row[key] ?? t(missing)];
-    }),
+    columns.map((column, index) => [
+      column,
+      row._structuralOnly && !['ITEM', 'BOM level'].includes(columnKeys[index])
+        ? ''
+        : row[columnKeys[index]] ?? t(missing),
+    ]),
   ));
   const toggleField = (key, checked) => setSelected(current => ({ ...current, [key]: checked }));
   const analyze = () => setAnalysedText(text);
@@ -108,8 +115,11 @@ export default function BatchStatusReport({ db, onClose }) {
     const popup = window.open('', '_blank');
     if (!popup) return;
     const head = columns.map(column => `<th>${escapeHtml(column)}</th>`).join('');
-    const body = exportRows().map(row =>
-      `<tr>${columns.map(column => `<td>${escapeHtml(row[column])}</td>`).join('')}</tr>`,
+    const body = exportRows().map((row, index) =>
+      `<tr>${columns.map(column => {
+        const indent = includeBomStructure && column === 'ITEM' ? ` style="padding-left:${6 + Math.min(rows[index]['BOM level'], 12) * 7}mm"` : '';
+        return `<td${indent}>${escapeHtml(row[column])}</td>`;
+      }).join('')}</tr>`,
     ).join('');
     const title = t('Material status report');
     popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>
@@ -170,17 +180,26 @@ export default function BatchStatusReport({ db, onClose }) {
             ))}
           </div>
           {selected.reach && (
-            <p className="mt-3 text-[11px] text-zinc-500">
-              {t('REACH status is inferred from recorded REACH/SVHC-related substances; the database does not store a separate REACH declaration.')}
-            </p>
+            <div className="mt-3 border-t border-zinc-800 pt-3">
+              <Check checked={includeReachVersion} onChange={setIncludeReachVersion}>
+                {t('Include SVHC list version number')}
+              </Check>
+            </div>
           )}
+          <div className="mt-3 border-t border-zinc-800 pt-3">
+            <div className="flex flex-wrap gap-x-5 gap-y-3">
+              <Check checked={includeBomStructure} onChange={setIncludeBomStructure}>{t('Rebuild BOM structure')}</Check>
+              <Check checked={skipDuplicates} onChange={setSkipDuplicates}>{t('Skip duplicate items')}</Check>
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-500">{t('BOM structure help')}</p>
+          </div>
         </fieldset>
 
         {parsed && (
           <section className="space-y-2">
             <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
-              <span>{t('Found in database:')} <b className="text-zinc-200">{parsed.found.length}</b></span>
-              <span>{t('Not found:')} <b className="text-zinc-200">{parsed.nf.length}</b></span>
+              <span>{t('Found in database:')} <b className="text-zinc-200">{rows.filter(row => row._found).length}</b></span>
+              <span>{t('Not found:')} <b className="text-zinc-200">{rows.filter(row => !row._found).length}</b></span>
               <span>{t('Showing results only; no automatic download.')}</span>
             </div>
             <div className="max-h-[45vh] overflow-auto rounded-lg border border-zinc-800">
@@ -191,7 +210,7 @@ export default function BatchStatusReport({ db, onClose }) {
                 <tbody>
                   {exportRows().map((row, index) => (
                     <tr key={`${row.ITEM}-${index}`} className="border-t border-zinc-800/70 align-top">
-                      {columns.map(column => <td key={column} className="max-w-md whitespace-pre-wrap px-3 py-2 text-zinc-300">{row[column] ?? t(missing)}</td>)}
+                      {columns.map(column => <td key={column} style={includeBomStructure && column === 'ITEM' ? { paddingLeft: `${12 + Math.min(rows[index]['BOM level'], 12) * 14}px` } : undefined} className="max-w-md whitespace-pre-wrap px-3 py-2 text-zinc-300">{row[column] ?? t(missing)}</td>)}
                     </tr>
                   ))}
                   {!rows.length && <tr><td colSpan={columns.length} className="px-3 py-6 text-center text-zinc-500">{t('No BOM items found to report.')}</td></tr>}

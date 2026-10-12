@@ -10,7 +10,7 @@ import { Chip } from '../components/ui/index.jsx';
 import BatchStatusReport from '../components/db/BatchStatusReport.jsx';
 import { panel, input, btnGhost, btnPrimary } from '../components/ui/styles.js';
 import { useI18n } from '../lib/i18n-context.js';
-import { reachStatus } from '../lib/rcd.js';
+import { reachLabel } from '../lib/rcd.js';
 
 const PER = 50;
 const coll = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
@@ -29,17 +29,13 @@ const FILTER_COLUMNS = {
     label: 'Supplier',
     value: row => row.it.sup || '',
   },
-  status: {
-    label: 'Status',
-    value: row => row.it.a || '',
-  },
   rohs: {
     label: 'RoHS',
     value: row => [row.it.r, ...(row.it.ex || [])].filter(Boolean).join(' '),
   },
   reach: {
-    label: 'Status REACH',
-    value: row => reachStatus(row.it),
+    label: 'REACH status',
+    value: row => reachLabel(row.it),
   },
   date: {
     label: 'Data dekl.',
@@ -97,7 +93,7 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
   };
 
   const rows = useMemo(() => Object.entries(db.items).map(([k, it]) => ({
-    k, it, hay: fold([k, it.i, it.d, it.sup, it.a, it.r, reachStatus(it), (it.al || []).join(' ')].join(' ')),
+    k, it, hay: fold([k, it.i, it.d, it.sup, it.r, FILTER_COLUMNS.reach.value({ it }), (it.al || []).join(' ')].join(' ')),
   })), [db]);
 
   const filtered = useMemo(() => {
@@ -123,9 +119,8 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
     const value = row => {
       if (sort.key === 'item') return row.k;
       if (sort.key === 'description') return row.it.d || '';
-      if (sort.key === 'status') return row.it.a || '';
       if (sort.key === 'rohs') return row.it.r || '';
-      if (sort.key === 'reach') return row.it.reach || row.it.reachStatus || reachStatus(row.it, language);
+      if (sort.key === 'reach') return FILTER_COLUMNS.reach.value(row);
       if (sort.key === 'date') return isoDt(row.it.dt || '');
       if (sort.key === 'substances') return Object.keys(row.it.h || {}).length;
       if (sort.key === 'missing') return (row.it.u || []).length;
@@ -139,7 +134,7 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
       return (sort.direction === 'asc' ? order : -order) || coll.compare(a.k, b.k);
     });
     return r;
-  }, [rows, dq, filters, sort, language]);
+  }, [rows, dq, filters, sort]);
 
   const pages = Math.max(1, Math.ceil(filtered.length / PER));
   const p = Math.min(page, pages - 1);
@@ -155,6 +150,58 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
     setPage(0);
   };
   const filterControl = key => {
+    if (key === 'descriptionSupplier') {
+      const description = filters.description;
+      const supplier = filters.supplier;
+      const controls = (field, filter) => (
+        <>
+          <label className="block text-[11px] font-medium text-zinc-400">
+            {t(FILTER_COLUMNS[field].label)}
+            <select
+              aria-label={`${t('Typ filtra')}: ${t(FILTER_COLUMNS[field].label)}`}
+              value={filter.mode}
+              onChange={event => updateFilter(field, { mode: event.target.value })}
+              className={cx(input, 'mt-1')}
+            >
+              <option value="all">{t('Wszystkie wartości')}</option>
+              <option value="nonempty">{t('Tylko niepuste')}</option>
+              <option value="empty">{t('Tylko puste')}</option>
+              <option value="text">{t('Szukaj słów')}</option>
+            </select>
+          </label>
+          {filter.mode === 'text' && (
+            <>
+              <input
+                value={filter.query}
+                onChange={event => updateFilter(field, { query: event.target.value })}
+                placeholder={t(field === 'supplier' ? 'Enter supplier name…' : 'Wpisz słowa do wyszukania…')}
+                aria-label={`${t('Szukaj w kolumnie')} ${t(FILTER_COLUMNS[field].label)}`}
+                className={input}
+              />
+              {field === 'supplier' && (
+                <select
+                  aria-label={t('Supplier match')}
+                  value={filter.match}
+                  onChange={event => updateFilter(field, { match: event.target.value })}
+                  className={input}
+                >
+                  <option value="contains">{t('Contains text')}</option>
+                  <option value="exact">{t('Exact match')}</option>
+                </select>
+              )}
+            </>
+          )}
+        </>
+      );
+      return (
+        <div className="w-72 space-y-3">
+          {controls('description', description)}
+          <div className="border-t border-zinc-700 pt-3">
+            {controls('supplier', supplier)}
+          </div>
+        </div>
+      );
+    }
     const filter = filters[key];
     const label = FILTER_COLUMNS[key].label;
     return (
@@ -216,7 +263,11 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
             >
               {t(label)}<Icon size={13} className={active ? 'text-indigo-300' : 'text-zinc-500'} />
             </button>
-            {filterKeys.map(activeFilterKey => (
+            {filterKeys.map(activeFilterKey => {
+              const activeFilter = activeFilterKey === 'descriptionSupplier'
+                ? filters.description.mode !== 'all' || filters.supplier.mode !== 'all'
+                : filters[activeFilterKey].mode !== 'all';
+              return (
               <button
                 key={activeFilterKey}
                 type="button"
@@ -233,19 +284,23 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
                     left: Math.max(8, Math.min(rect.left, window.innerWidth - 280)),
                   });
                 }}
-                aria-label={`${t('Otwórz filtr:')} ${t(FILTER_COLUMNS[activeFilterKey].label)}`}
+                aria-label={activeFilterKey === 'descriptionSupplier'
+                  ? `${t('Otwórz filtr:')} ${t(FILTER_COLUMNS.description.label)} / ${t(FILTER_COLUMNS.supplier.label)}`
+                  : `${t('Otwórz filtr:')} ${t(FILTER_COLUMNS[activeFilterKey].label)}`}
                 aria-expanded={openFilter?.key === activeFilterKey}
-                title={`${t('Filtruj')}: ${t(FILTER_COLUMNS[activeFilterKey].label)}`}
+                title={activeFilterKey === 'descriptionSupplier'
+                  ? `${t('Filtruj')}: ${t(FILTER_COLUMNS.description.label)} / ${t(FILTER_COLUMNS.supplier.label)}`
+                  : `${t('Filtruj')}: ${t(FILTER_COLUMNS[activeFilterKey].label)}`}
                 className={cx(
                   'rounded p-1 transition-colors',
-                  filters[activeFilterKey].mode !== 'all'
+                  activeFilter
                     ? 'bg-indigo-500/20 text-indigo-300'
                     : 'text-zinc-500 hover:bg-zinc-700 hover:text-zinc-200',
                 )}
               >
                 <Filter size={13} />
               </button>
-            ))}
+            );})}
           </div>
         </div>
       </th>
@@ -311,10 +366,9 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
             <thead className="bg-zinc-950/60 text-zinc-500 border-b border-zinc-800">
               <tr className="text-left">
                 {sortHeader('ITEM', 'item', '', 'item')}
-                {sortHeader('Opis / dostawca', 'description', '', ['description', 'supplier'])}
-                {sortHeader('Status', 'status', '', 'status')}
+                {sortHeader('Opis / dostawca', 'description', '', 'descriptionSupplier')}
                 {sortHeader('RoHS', 'rohs', '', 'rohs')}
-                {sortHeader('REACH', 'reach', '', 'reach')}
+                {sortHeader('REACH status', 'reach', '', 'reach')}
                 {sortHeader('Data dekl.', 'date', 'whitespace-nowrap', 'date')}
                 {sortHeader('Substancje', 'substances', '', 'substances')}
                 {sortHeader('Braki', 'missing', '', 'missing')}
@@ -333,13 +387,10 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
                     {it.sup && <div className="text-[10px] text-zinc-500">{it.sup}</div>}
                     {(it.w || []).length > 0 && <div className="text-[10px] text-amber-400/90 truncate max-w-md" title={it.w.join('\n')}>⚠ {it.w[0]}</div>}
                   </td>
-                  <td className="px-3 py-2 whitespace-nowrap text-zinc-400">{it.a}</td>
                   <td className="px-3 py-2 text-zinc-400 max-w-[180px]"><div className="truncate" title={it.r}>{it.r}</div>
                     {(it.ex || []).length > 0 && <div className="text-[10px] text-orange-300">{t('wyj.')} {it.ex.join(', ')}</div>}</td>
                   <td className="px-3 py-2 text-zinc-400 max-w-[200px]">
-                    <div className="truncate" title={`${reachStatus(it, language)}${it.reach || it.reachStatus ? '' : ` (${t('inferred from existing data')})`}`}>
-                      {reachStatus(it, language)}
-                    </div>
+                    <div className="truncate" title={reachLabel(it, language)}>{reachLabel(it, language)}</div>
                   </td>
                   <td className="px-3 py-2 whitespace-nowrap text-zinc-500">{it.dt}</td>
                   <td className="px-3 py-2"><div className="flex flex-wrap gap-0.5 max-w-xs">
@@ -360,7 +411,7 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
                 </tr>
               ))}
               {!view.length && (
-                <tr><td colSpan={9} className="px-3 py-10 text-center text-zinc-500">
+                <tr><td colSpan={8} className="px-3 py-10 text-center text-zinc-500">
                   <Database size={22} className="mx-auto mb-2 text-zinc-700" />
                   {t('Brak rekordów dla wybranych filtrów.')}
                 </td></tr>
