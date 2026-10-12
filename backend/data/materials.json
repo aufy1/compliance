@@ -1,9 +1,0 @@
-{
-  "materials": [
-    { "id": "m1", "name": "Miedź (Cu) - Przewodnik", "type": "conductor", "needs_rohs_check": false },
-    { "id": "m2", "name": "Aluminium (Al) - Przewodnik", "type": "conductor", "needs_rohs_check": false },
-    { "id": "m3", "name": "Polichlorek winylu (PVC) - Izolacja", "type": "insulation", "needs_rohs_check": true },
-    { "id": "m4", "name": "Polietylen usieciowany (XLPE)", "type": "insulation", "needs_rohs_check": true },
-    { "id": "m5", "name": "Bezhalogenowa powłoka (LSZH)", "type": "jacket", "needs_rohs_check": true }
-  ]
-}

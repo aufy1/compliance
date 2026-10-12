@@ -1,1 +1,14 @@
-*json
+node_modules/
+dist/
+backend/data/
+rcd-data/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.json
+*.json
+!backend/seed/
+!backend/seed/*.json
+seed/
+seed

@@ -6,8 +6,22 @@ services:
       - "8000"
     volumes:
       - ./backend:/app
+      - ./rcd-data:/data
     environment:
+      - PORT=8000
+      - DATA_DIR=/data
+      - BACKUP_KEEP=30
       - PYTHONUNBUFFERED=1
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   frontend:
     build: ./frontend
@@ -19,8 +33,20 @@ services:
       - /app/node_modules
     environment:
       - CHOKIDAR_USEPOLLING=true
+      - VITE_API_TARGET=http://backend:8000
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5173/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   nginx:
     image: nginx:alpine
@@ -30,8 +56,10 @@ services:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - frontend
-      - backend
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
     networks:
       - default
       - proxy_ext_net

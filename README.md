@@ -1,0 +1,59 @@
+# compliance – BOMcheck RCD helper
+
+Narzędzie do przygotowania odpowiedzi w BOMcheck RCD (RoHS, REACH/SVHC, PFAS, Prop 65, TSCA, CRM…) dla przewodów i wiązek
+oraz baza materiałów (surowców) z trafieniami substancji.
+
+## Funkcje
+- **Ankieta RCD** – lista substancji, profile, analiza BOM (wklejka / xlsx / csv), generator skryptu do konsoli, bookmarklet i lista ręczna.
+- **Baza materiałów** – wyszukiwanie, filtry (substancja, braki danych, uwagi, wyjątki, zmiany ręczne), **dodawanie, edycja i usuwanie rekordów**.
+  - „Sugeruj z opisu” uruchamia ten sam klasyfikator co import CSV.
+  - Pozycje BOM spoza bazy można dodać jednym kliknięciem.
+  - Ochrona przed nadpisaniem cudzej zmiany (HTTP 409).
+  - Raport statusów BOM (RoHS, REACH/SVHC, data deklaracji, wykryte substancje) z podglądem oraz eksportem CSV/JSON i drukowaniem.
+- **Import** – przebudowa bazy z CSV statusów lub wczytanie JSON, z opcją zachowania rekordów edytowanych ręcznie.
+- **Kopie zapasowe** – osobny widok z listą kopii, pobieraniem, usuwaniem i ręcznym tworzeniem kopii. Nowe pliki mają prefiks `material_db_`.
+  - pobranie całego JSON-a jednym kliknięciem (`GET /api/backup`),
+  - kopie na serwerze: automatycznie raz dziennie przy pierwszej zmianie, przed każdym importem i na żądanie (trzymane ostatnie `BACKUP_KEEP`, domyślnie 30).
+- **Import JSON** – Nginx aplikacji przyjmuje żądania do 64 MB; zewnętrzny reverse proxy również musi mieć `client_max_body_size 64m;`, aby większy plik mógł dotrzeć do aplikacji.
+
+## Uruchomienie (Docker)
+```bash
+docker compose up -d --build
+# http://localhost:8091
+```
+Compose uruchamia osobno API FastAPI (`compl-backend`), frontend developerski Vite (`compl-frontend`) i Nginx (`compl-nginx`). Frontend i API są dostępne przez Nginx; reverse proxy może kierować ruch do `compl-nginx` w zewnętrznej sieci `proxy_ext_net`.
+
+Sieć `proxy_ext_net` musi już istnieć przed uruchomieniem Compose. Baza i kopie leżą w katalogu `./rcd-data` w katalogu głównym projektu (montowanym jako `/data` w kontenerze backendu). Przy pierwszym starcie baza jest tworzona z `backend/seed/rcd_material_db.json`.
+
+## Development
+```bash
+docker compose up --build         # frontend z hot reloadem; wejście przez http://localhost:8091
+```
+
+## Struktura
+```
+backend/   main.py (FastAPI + zapis JSON + kopie), seed/rcd_material_db.json
+frontend/  React + Vite + Tailwind v4 + lucide-react
+  src/lib/        substances.js (mapowanie na RCD), rcddb.js (parser CSV/klasyfikator), runner.js (skrypt BOMcheck), rcd.js
+  src/views/      HelperView (ankieta), DatabaseView (baza), BackupView (kopie)
+  src/components/ Header, helper/*, db/RecordEditor, ui/*
+nginx/     reverse proxy /api → FastAPI oraz / → Vite
+```
+
+## API
+| Metoda | Ścieżka | Opis |
+|---|---|---|
+| GET | `/api/db` | cała baza |
+| GET | `/api/meta` | metadane (n, src, built, updated) |
+| POST | `/api/items` | nowy rekord `{ item }` |
+| PUT | `/api/items/:key` | edycja `{ item, base }` (`base` = poprzednie `mod`) |
+| DELETE | `/api/items/:key` | usunięcie |
+| PUT | `/api/db` | zastąpienie całej bazy (import) |
+| GET | `/api/backup` | pobranie kopii całej bazy |
+| GET/POST | `/api/backups` | lista / utworzenie kopii na serwerze |
+| GET | `/api/backups/:name` | pobranie konkretnej kopii |
+| POST | `/api/backups/:name/delete` | usunięcie konkretnej kopii |
+
+Schemat rekordu: `i` ITEM, `d` opis, `a` status, `sup` dostawca, `r` RoHS, `dt` data deklaracji,
+`h` substancje `{ id: [źródło d|o|i|p, dowód] }`, `ex` wyjątki RoHS, `u` braki danych (`rohs|svhc|pfas|pip`),
+`al` aliasy, `w` uwagi, `dup` liczba duplikatów w CSV, `mod` data ręcznej zmiany.
