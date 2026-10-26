@@ -5,6 +5,7 @@ rcd-data/
 __pycache__/
 *.pyc
 .env
+nginx/auth/.htpasswd
 .DS_Store
 .json
 *.json

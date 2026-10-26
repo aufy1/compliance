@@ -18,9 +18,23 @@ oraz baza materiałów (surowców) z trafieniami substancji.
 
 ## Uruchomienie (Docker)
 ```bash
+htpasswd -cB nginx/auth/.htpasswd NAZWA_UZYTKOWNIKA
 docker compose up -d --build
 # http://localhost:8091
 ```
+Polecenie `htpasswd` (z pakietu `apache2-utils`) utworzy lokalny plik z hashem hasła. Plik jest ignorowany przez Git. Przy dodawaniu kolejnych użytkowników użyj `htpasswd -B nginx/auth/.htpasswd NAZWA_UZYTKOWNIKA` (bez `-c`, aby nie nadpisać istniejących kont).
+
+Worker Nginx działa jako użytkownik `nginx` (GID 101 w obrazie `nginx:alpine`), więc katalog i plik haseł muszą być czytelne dla tej grupy. Ustaw grupę i prawa, a następnie odtwórz kontener:
+```bash
+sudo chgrp -R 101 nginx/auth
+chmod 750 nginx/auth
+chmod 640 nginx/auth/.htpasswd
+docker compose up -d --force-recreate nginx
+```
+Jeżeli używasz innego obrazu Nginx, sprawdź GID procesu worker poleceniem `docker exec compl-nginx id nginx` i użyj tego GID zamiast `101`.
+
+Nginx wymaga logowania do całej aplikacji, włącznie z API, i ogranicza łączny ruch do 100 żądań/s niezależnie od adresu klienta, dopuszczając burst do 100 dodatkowych żądań; po przekroczeniu zwraca HTTP 429. Burst pozwala przeglądarce załadować wiele plików strony jednocześnie. Nie interpretuje nagłówka `X-Real-IP` z reverse proxy — adres klienta widziany przez aplikację będzie adresem proxy. Udostępniaj aplikację przez HTTPS, zwłaszcza poza lokalnym środowiskiem — Basic Auth przesyła dane logowania w nagłówku, który bez TLS nie jest szyfrowany.
+
 Compose uruchamia osobno API FastAPI (`compl-backend`), frontend developerski Vite (`compl-frontend`) i Nginx (`compl-nginx`). Frontend i API są dostępne przez Nginx; reverse proxy może kierować ruch do `compl-nginx` w zewnętrznej sieci `proxy_ext_net`.
 
 Sieć `proxy_ext_net` musi już istnieć przed uruchomieniem Compose. Baza i kopie leżą w katalogu `./rcd-data` w katalogu głównym projektu (montowanym jako `/data` w kontenerze backendu). Przy pierwszym starcie baza jest tworzona z `backend/seed/rcd_material_db.json`.
