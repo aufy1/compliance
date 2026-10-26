@@ -1,73 +1,72 @@
-# compliance – BOMcheck RCD helper
+# Compliance – BOMcheck RCD Helper
 
-Narzędzie do przygotowania odpowiedzi w BOMcheck RCD (RoHS, REACH/SVHC, PFAS, Prop 65, TSCA, CRM…) dla przewodów i wiązek
-oraz baza materiałów (surowców) z trafieniami substancji.
+Tool for preparing BOMcheck RCD responses (RoHS, REACH/SVHC, PFAS, Prop 65, TSCA, CRM, etc.) for cables and wire harnesses, and a materials database with substance matches.
 
-## Funkcje
-- **Ankieta RCD** – lista substancji, profile, analiza BOM (wklejka / xlsx / csv), generator skryptu do konsoli, bookmarklet i lista ręczna.
-- **Baza materiałów** – wyszukiwanie, filtry (substancja, braki danych, uwagi, wyjątki, zmiany ręczne), **dodawanie, edycja i usuwanie rekordów**.
-  - „Sugeruj z opisu” uruchamia ten sam klasyfikator co import CSV.
-  - Pozycje BOM spoza bazy można dodać jednym kliknięciem.
-  - Ochrona przed nadpisaniem cudzej zmiany (HTTP 409).
-  - Raport statusów BOM (RoHS, REACH/SVHC, data deklaracji, wykryte substancje) z podglądem oraz eksportem CSV/JSON i drukowaniem.
-- **Import** – przebudowa bazy z CSV statusów lub wczytanie JSON, z opcją zachowania rekordów edytowanych ręcznie.
-- **Kopie zapasowe** – osobny widok z listą kopii, pobieraniem, usuwaniem i ręcznym tworzeniem kopii. Nowe pliki mają prefiks `material_db_`.
-  - pobranie całego JSON-a jednym kliknięciem (`GET /api/backup`),
-  - kopie na serwerze: automatycznie raz dziennie przy pierwszej zmianie, przed każdym importem i na żądanie (trzymane ostatnie `BACKUP_KEEP`, domyślnie 30).
-- **Import JSON** – Nginx aplikacji przyjmuje żądania do 64 MB; zewnętrzny reverse proxy również musi mieć `client_max_body_size 64m;`, aby większy plik mógł dotrzeć do aplikacji.
+## Features
+- **RCD questionnaire** – substance list, profiles, BOM analysis (paste / XLSX / CSV), console script generator, bookmarklet, and manual list.
+- **Materials database** – search and filters (substance, missing data, notes, exemptions, manual changes), with **record creation, editing, and deletion**.
+  - “Suggest from description” uses the same classifier as the CSV import.
+  - BOM items not found in the database can be added with one click.
+  - Protection against overwriting someone else's changes (HTTP 409).
+  - BOM status report (RoHS, REACH/SVHC, declaration date, detected substances) with preview, CSV/JSON export, and printing.
+- **Import** – rebuild the database from a status CSV or load JSON, with an option to preserve manually edited records.
+- **Backups** – a separate view for listing, downloading, deleting, and manually creating backups. New files use the `material_db_` prefix.
+  - Download the entire database JSON in one click (`GET /api/backup`).
+  - Server backups are created automatically once per day on the first change, before every import, and on request. The latest `BACKUP_KEEP` backups are retained (30 by default).
+- **JSON import** – the app's Nginx accepts requests up to 64 MB. The external reverse proxy must also set `client_max_body_size 64m;` for larger files to reach the app.
 
-## Uruchomienie (Docker)
+## Run with Docker
 ```bash
-htpasswd -cB nginx/auth/.htpasswd NAZWA_UZYTKOWNIKA
+htpasswd -cB nginx/auth/.htpasswd USERNAME
 docker compose up -d --build
 # http://localhost:8091
 ```
-Polecenie `htpasswd` (z pakietu `apache2-utils`) utworzy lokalny plik z hashem hasła. Plik jest ignorowany przez Git. Przy dodawaniu kolejnych użytkowników użyj `htpasswd -B nginx/auth/.htpasswd NAZWA_UZYTKOWNIKA` (bez `-c`, aby nie nadpisać istniejących kont).
+The `htpasswd` command (from the `apache2-utils` package) creates a local file containing a password hash. The file is ignored by Git. To add more users, run `htpasswd -B nginx/auth/.htpasswd USERNAME` (without `-c`, which would overwrite existing accounts).
 
-Worker Nginx działa jako użytkownik `nginx` (GID 101 w obrazie `nginx:alpine`), więc katalog i plik haseł muszą być czytelne dla tej grupy. Ustaw grupę i prawa, a następnie odtwórz kontener:
+The Nginx worker runs as the `nginx` user (GID 101 in the `nginx:alpine` image), so the directory and password file must be readable by that group. Set the group and permissions, then recreate the container:
 ```bash
 sudo chgrp -R 101 nginx/auth
 chmod 750 nginx/auth
 chmod 640 nginx/auth/.htpasswd
 docker compose up -d --force-recreate nginx
 ```
-Jeżeli używasz innego obrazu Nginx, sprawdź GID procesu worker poleceniem `docker exec compl-nginx id nginx` i użyj tego GID zamiast `101`.
+If you use a different Nginx image, check the worker process GID with `docker exec compl-nginx id nginx` and use that GID instead of `101`.
 
-Nginx wymaga logowania do całej aplikacji, włącznie z API, i ogranicza łączny ruch do 100 żądań/s niezależnie od adresu klienta, dopuszczając burst do 100 dodatkowych żądań; po przekroczeniu zwraca HTTP 429. Burst pozwala przeglądarce załadować wiele plików strony jednocześnie. Nie interpretuje nagłówka `X-Real-IP` z reverse proxy — adres klienta widziany przez aplikację będzie adresem proxy. Udostępniaj aplikację przez HTTPS, zwłaszcza poza lokalnym środowiskiem — Basic Auth przesyła dane logowania w nagłówku, który bez TLS nie jest szyfrowany.
+Nginx requires authentication for the entire app, including the API, and limits total traffic to 100 requests per second regardless of client address, allowing a burst of up to 100 additional requests. Further requests receive HTTP 429. The burst allows browsers to load multiple page assets at once. The app does not interpret the `X-Real-IP` header from the reverse proxy, so it sees the proxy's address as the client address. Serve the app over HTTPS, especially outside local development: Basic Auth sends credentials in a header that is not encrypted without TLS.
 
-Compose uruchamia osobno API FastAPI (`compl-backend`), frontend developerski Vite (`compl-frontend`) i Nginx (`compl-nginx`). Frontend i API są dostępne przez Nginx; reverse proxy może kierować ruch do `compl-nginx` w zewnętrznej sieci `proxy_ext_net`.
+Compose runs the FastAPI API (`compl-backend`), Vite development frontend (`compl-frontend`), and Nginx (`compl-nginx`) as separate services. The frontend and API are available through Nginx; a reverse proxy can route traffic to `compl-nginx` on the external `proxy_ext_net` network.
 
-Sieć `proxy_ext_net` musi już istnieć przed uruchomieniem Compose. Baza i kopie leżą w katalogu `./rcd-data` w katalogu głównym projektu (montowanym jako `/data` w kontenerze backendu). Przy pierwszym starcie baza jest tworzona z `backend/seed/rcd_material_db.json`.
+The `proxy_ext_net` network must exist before starting Compose. The database and backups are stored in `./rcd-data` in the project root (mounted as `/data` in the backend container). On first startup, the database is initialized from `backend/seed/rcd_material_db.json`.
 
 ## Development
 ```bash
-docker compose up --build         # frontend z hot reloadem; wejście przez http://localhost:8091
+docker compose up --build         # frontend with hot reload; open http://localhost:8091
 ```
 
-## Struktura
+## Project structure
 ```
-backend/   main.py (FastAPI + zapis JSON + kopie), seed/rcd_material_db.json
+backend/   main.py (FastAPI + JSON persistence + backups), seed/rcd_material_db.json
 frontend/  React + Vite + Tailwind v4 + lucide-react
-  src/lib/        substances.js (mapowanie na RCD), rcddb.js (parser CSV/klasyfikator), runner.js (skrypt BOMcheck), rcd.js
-  src/views/      HelperView (ankieta), DatabaseView (baza), BackupView (kopie)
+  src/lib/        substances.js (RCD mapping), rcddb.js (CSV parser/classifier), runner.js (BOMcheck script), rcd.js
+  src/views/      HelperView (questionnaire), DatabaseView (database), BackupView (backups)
   src/components/ Header, helper/*, db/RecordEditor, ui/*
-nginx/     reverse proxy /api → FastAPI oraz / → Vite
+nginx/     reverse proxy /api → FastAPI and / → Vite
 ```
 
 ## API
-| Metoda | Ścieżka | Opis |
+| Method | Path | Description |
 |---|---|---|
-| GET | `/api/db` | cała baza |
-| GET | `/api/meta` | metadane (n, src, built, updated) |
-| POST | `/api/items` | nowy rekord `{ item }` |
-| PUT | `/api/items/:key` | edycja `{ item, base }` (`base` = poprzednie `mod`) |
-| DELETE | `/api/items/:key` | usunięcie |
-| PUT | `/api/db` | zastąpienie całej bazy (import) |
-| GET | `/api/backup` | pobranie kopii całej bazy |
-| GET/POST | `/api/backups` | lista / utworzenie kopii na serwerze |
-| GET | `/api/backups/:name` | pobranie konkretnej kopii |
-| POST | `/api/backups/:name/delete` | usunięcie konkretnej kopii |
+| GET | `/api/db` | Full database |
+| GET | `/api/meta` | Metadata (n, src, built, updated) |
+| POST | `/api/items` | Create a record `{ item }` |
+| PUT | `/api/items/:key` | Update a record `{ item, base }` (`base` = previous `mod` value) |
+| DELETE | `/api/items/:key` | Delete a record |
+| PUT | `/api/db` | Replace the entire database (import) |
+| GET | `/api/backup` | Download a backup of the entire database |
+| GET/POST | `/api/backups` | List / create a server-side backup |
+| GET | `/api/backups/:name` | Download a specific backup |
+| POST | `/api/backups/:name/delete` | Delete a specific backup |
 
-Schemat rekordu: `i` ITEM, `d` opis, `a` status, `sup` dostawca, `r` RoHS, `dt` data deklaracji,
-`h` substancje `{ id: [źródło d|o|i|p, dowód] }`, `ex` wyjątki RoHS, `u` braki danych (`rohs|svhc|pfas|pip`),
-`al` aliasy, `w` uwagi, `dup` liczba duplikatów w CSV, `mod` data ręcznej zmiany.
+Record schema: `i` ITEM, `d` description, `a` status, `sup` supplier, `r` RoHS, `dt` declaration date,
+`h` substances `{ id: [source d|o|i|p, evidence] }`, `ex` RoHS exemptions, `u` missing data (`rohs|svhc|pfas|pip`),
+`al` aliases, `w` notes, `dup` number of duplicates in the CSV, `mod` date of manual change.

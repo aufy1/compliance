@@ -43,6 +43,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [substanceSearch, setSubstanceSearch] = useState({});
+  const [substanceSearchOpen, setSubstanceSearchOpen] = useState({});
   const set = k => v => setF(p => ({ ...p, [k]: v }));
   const setRow = (u, patch) => setF(p => ({ ...p, h: p.h.map(x => (x.uid === u ? { ...x, ...patch } : x)) }));
   const substanceOptions = useMemo(() => ASSIGNABLE_GROUPS.flatMap(group => group.items.map(item => ({
@@ -160,7 +161,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
           </div>
           <div className="md:col-span-3">
             <Label>{tr('Status RoHS')}</Label>
-            <input className={input} list="dl-r" value={f.r} onChange={e => set('r')(e.target.value)} placeholder="YES / YES 6(c) / …" />
+            <input className={input} list="dl-r" value={f.r} onChange={e => set('r')(e.target.value)} placeholder="YES / NO / Exemption" />
           </div>
           <div className="md:col-span-3">
             <Label>{tr('REACH compliance')}</Label>
@@ -185,22 +186,43 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
         }>{tr('Substancje → odpowiedzi w ankiecie RCD')}</SectionTitle>
         <div className="space-y-2">
           {!f.h.length && <div className="text-xs text-zinc-500 bg-zinc-950/50 border border-dashed border-zinc-800 rounded-lg px-3 py-3">{tr('Brak substancji – element nie zaznaczy niczego w ankiecie (wszystko „Yes”).')}</div>}
-          {f.h.map(x => (
+          {f.h.map(x => {
+            const selectedLabel = substanceOptions.find(option => option.id === x.id)?.label || x.id || '';
+            const searchTerm = substanceSearch[x.uid] || '';
+            const searchActive = substanceSearchOpen[x.uid] || (!x.id && Boolean(searchTerm.trim()));
+            const showSuggestions = searchActive
+              && searchTerm.trim()
+              && searchTerm.trim().toLocaleLowerCase() !== selectedLabel.trim().toLocaleLowerCase();
+            return (
             <div key={x.uid} className="grid grid-cols-12 gap-2 items-center">
-              <div className="relative z-10 col-span-12 sm:col-span-4">
-                <input value={substanceSearch[x.uid] ?? ''}
+              <div className={cx('relative col-span-12 sm:col-span-4', searchActive ? 'z-50' : 'z-10')}>
+                <input
+                  value={substanceSearchOpen[x.uid]
+                    ? substanceSearch[x.uid] ?? ''
+                    : selectedLabel}
+                  onClick={() => {
+                    if (x.id && !substanceSearchOpen[x.uid]) {
+                      const selected = substanceOptions.find(option => option.id === x.id);
+                      setSubstanceSearch(search => ({ ...search, [x.uid]: selected?.label || x.id }));
+                      setSubstanceSearchOpen(open => ({ ...open, [x.uid]: true }));
+                    }
+                  }}
                   onChange={event => setSubstanceSearch(search => ({ ...search, [x.uid]: event.target.value }))}
-                  className={cx(input, dupIds.includes(x.id) && 'border-red-500')}
-                  placeholder={tr('Szukaj substancji po nazwie lub CAS')} autoComplete="off" />
-                {x.id && <div className="mt-1 truncate text-[10px] text-indigo-300" title={substanceOptions.find(option => option.id === x.id)?.label}>
-                  {tr('Wybrano')}: {substanceOptions.find(option => option.id === x.id)?.label || x.id}
-                </div>}
-                {matchingSubstances(substanceSearch[x.uid] || '').length > 0 && (
-                  <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-56 overflow-auto rounded-lg border border-zinc-700 bg-zinc-900 p-1 shadow-xl">
-                    {matchingSubstances(substanceSearch[x.uid] || '').map(option => (
+                  readOnly={Boolean(x.id && !substanceSearchOpen[x.uid])}
+                  className={x.id && !substanceSearchOpen[x.uid]
+                    ? cx('w-full truncate border border-transparent bg-transparent px-0 py-2 text-xs text-indigo-300 focus:outline-none', dupIds.includes(x.id) && 'text-red-400')
+                    : cx(input, dupIds.includes(x.id) && 'border-red-500')}
+                  placeholder={tr('Szukaj substancji po nazwie lub CAS')}
+                  autoComplete="off"
+                  autoFocus={Boolean(x.id && substanceSearchOpen[x.uid])}
+                />
+                {showSuggestions && matchingSubstances(searchTerm).length > 0 && (
+                  <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-56 overflow-auto rounded-lg border border-zinc-700 bg-zinc-900 p-1 shadow-xl">
+                    {matchingSubstances(searchTerm).map(option => (
                       <button key={option.id} type="button" onClick={() => {
                         setRow(x.uid, { id: option.id });
                         setSubstanceSearch(search => ({ ...search, [x.uid]: '' }));
+                        setSubstanceSearchOpen(open => ({ ...open, [x.uid]: false }));
                       }} className="block w-full rounded-md px-2.5 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800">
                         <span className="block">{option.label}</span>
                         <span className="mt-0.5 block font-mono text-[10px] text-zinc-500">{option.terms.filter(term => /^\d{2,7}-\d{2}-\d$/.test(term)).join(', ') || option.id}</span>
@@ -217,7 +239,8 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
               <button type="button" onClick={() => setF(p => ({ ...p, h: p.h.filter(y => y.uid !== x.uid) }))}
                 className="col-span-1 justify-self-center p-2 rounded-md text-zinc-500 hover:text-red-300 hover:bg-red-500/10"><Trash2 size={14} /></button>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <SectionTitle>{tr('Wyjątki, aliasy i braki danych')}</SectionTitle>
