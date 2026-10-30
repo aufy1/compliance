@@ -175,7 +175,7 @@ export default function BomPanel({ db, sel, onApply, onAddCrit, onEditRecord, on
                             <td className="px-2 py-1.5 text-zinc-300">{r.it.d || ''}<div className="text-[10px] text-zinc-500">{[r.it.sup, r.it.dt].filter(Boolean).join(' · ')}</div></td>
                             <td className="px-2 py-1.5"><div className="flex flex-wrap gap-0.5">
                               {r.used.map(([id, s, ev]) => (
-                                <Chip key={id} title={SRCL[s][0] + ': ' + ev} className={CRIT.has(id) ? 'bg-red-500/20 text-red-200 ring-red-500/50' : SRCL[s][1]}>{shortName(id)}{s === 'p' ? '?' : ''}</Chip>
+                                <Chip key={id} title={t(SRCL[s][0]) + ': ' + ev} className={CRIT.has(id) ? 'bg-red-500/20 text-red-200 ring-red-500/50' : SRCL[s][1]}>{shortName(id)}{s === 'p' ? '?' : ''}</Chip>
                               ))}
                               {r.skipped.length > 0 && <span className="text-[10px] text-zinc-500" title={r.skipped.map(x => x[0] + ' – ' + x[2]).join('\n')}> +{r.skipped.length} {t('pominięte')}</span>}
                               {!r.used.length && !r.skipped.length && <span className="text-zinc-600">—</span>}

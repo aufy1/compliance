@@ -8,10 +8,12 @@ import { Modal, TagInput } from '../ui/index.jsx';
 import { input, btnGhost, btnPrimary, btnDanger } from '../ui/styles.js';
 import { useI18n } from '../../lib/i18n-context.js';
 import { reachCompliance, reachVersion } from '../../lib/rcd.js';
+import MaterialDocuments from './MaterialDocuments.jsx';
 
 let uid = 0;
 const toForm = it => ({
   i: it.i || '', d: it.d || '', sup: it.sup || '', r: it.r || '',
+  packing: Boolean(it.packing),
   rc: reachCompliance(it) == null ? '' : String(reachCompliance(it)),
   rn: reachVersion(it), dt: it.dt || '',
   h: Object.entries(it.h || {}).map(([id, [s, ev]]) => ({ uid: ++uid, id, s, ev: ev || '' })),
@@ -19,6 +21,7 @@ const toForm = it => ({
 });
 const fromForm = f => ({
   i: f.i.trim(), d: f.d, sup: f.sup, r: f.r,
+  packing: f.packing,
   ...(f.rc !== '' ? { rc: f.rc === 'true' } : {}),
   ...(f.rn.trim() && Number.isFinite(Number(f.rn)) ? { rn: Number(f.rn) } : {}),
   dt: f.dt,
@@ -155,6 +158,12 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
             <Label>{tr('Opis (DESC)')}</Label>
             <input className={input} value={f.d} onChange={e => set('d')(e.target.value)} placeholder="np. CBL 2x0.75mm2 H05VV-F BLK" />
           </div>
+          <div className="md:col-span-6">
+            <label className="inline-flex items-center gap-2 text-xs text-zinc-300">
+              <input type="checkbox" checked={f.packing} onChange={e => set('packing')(e.target.checked)} className="h-3.5 w-3.5 accent-indigo-500" />
+              {tr('Packing material')}
+            </label>
+          </div>
           <div className="md:col-span-3">
             <Label>{tr('Dostawca / producent')}</Label>
             <input className={input} list="dl-sup" value={f.sup} onChange={e => set('sup')(e.target.value)} />
@@ -177,6 +186,9 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
               onChange={e => set('rn')(e.target.value.replace(/\D/g, ''))} placeholder="e.g. 253" />
           </div>
         </div>
+
+        <SectionTitle>{tr('Documents')}</SectionTitle>
+        <MaterialDocuments materialKey={editing.key} material={db} notify={notify} />
 
         <SectionTitle right={
           <div className="flex gap-2">
@@ -232,7 +244,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
                 )}
               </div>
               <select value={x.s} onChange={e => setRow(x.uid, { s: e.target.value })} className={cx(input, 'col-span-4 sm:col-span-2')}>
-                {Object.entries(SRCL).map(([k, [l]]) => <option key={k} value={k}>{l}</option>)}
+                {Object.entries(SRCL).map(([k, [l]]) => <option key={k} value={k}>{tr(l)}</option>)}
               </select>
               <input value={x.ev} onChange={e => setRow(x.uid, { ev: e.target.value })} placeholder={tr('dowód / źródło, np. deklaracja dostawcy 2026-03, SVHC: lead')}
                 className={cx(input, 'col-span-7 sm:col-span-5')} />

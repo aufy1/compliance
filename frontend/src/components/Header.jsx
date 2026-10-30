@@ -1,11 +1,13 @@
 import { useRef, useState } from 'react';
-import { Archive, Database, FileJson, FileSpreadsheet, ListChecks, RefreshCw, Settings, ShieldCheck, Trash2, X } from 'lucide-react';
+import { Archive, Database, FileJson, FileSpreadsheet, Files, ListChecks, Package, RefreshCw, Settings, ShieldCheck, Trash2, X } from 'lucide-react';
 import { cx } from '../lib/utils.js';
 import { useI18n } from '../lib/i18n-context.js';
 
 const navItems = [
   { value: 'helper', label: 'Ankieta RCD', icon: ListChecks },
   { value: 'db', label: 'Baza materiałów', icon: Database },
+  { value: 'packing', label: 'Packing materials', icon: Package },
+  { value: 'documents', label: 'PDF document library', icon: Files },
   { value: 'backups', label: 'Kopie zapasowe', icon: Archive },
 ];
 
@@ -94,7 +96,7 @@ export default function Header({ view, setView, meta, onImportCsv, onImportJson,
               <div className="rounded-lg border border-zinc-800 p-4">
                 <h3 className="mb-3 text-sm font-semibold text-zinc-200">{t('Wczytywanie bazy')}</h3>
                 <input ref={csvRef} type="file" accept=".csv,.txt" hidden onChange={pickFile(onImportCsv)} />
-                <input ref={jsonRef} type="file" accept=".json" hidden onChange={pickFile(onImportJson)} />
+                <input ref={jsonRef} type="file" accept=".json,.zip,application/zip" hidden onChange={pickFile(onImportJson)} />
                 <div className="flex flex-wrap gap-2">
                   <button type="button" onClick={onReload} className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800">
                     <RefreshCw size={14} /> {t('Odśwież bazę')}
@@ -103,7 +105,7 @@ export default function Header({ view, setView, meta, onImportCsv, onImportJson,
                     <FileSpreadsheet size={14} className="text-emerald-300" /> CSV
                   </button>
                   <button type="button" onClick={() => jsonRef.current?.click()} className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800">
-                    <FileJson size={14} className="text-amber-300" /> JSON
+                    <FileJson size={14} className="text-amber-300" /> {t('JSON / ZIP')}
                   </button>
                 </div>
               </div>

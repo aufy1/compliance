@@ -6,6 +6,8 @@ import { readBuf, cx } from './lib/utils.js';
 import Header from './components/Header.jsx';
 import HelperView from './views/HelperView.jsx';
 import DatabaseView from './views/DatabaseView.jsx';
+import PackingView from './views/PackingView.jsx';
+import DocumentsView from './views/DocumentsView.jsx';
 import BackupView from './views/BackupView.jsx';
 import RecordEditor from './components/db/RecordEditor.jsx';
 import { Modal, Check } from './components/ui/index.jsx';
@@ -88,9 +90,21 @@ export default function App() {
   };
   const onImportJson = async f => {
     try {
+      if (f.name.toLocaleLowerCase().endsWith('.zip')) {
+        if (!window.confirm(t('Restore the full database and PPWR files from {file}?', { file: f.name }))) return;
+        const result = await api.importBackupZip(f);
+        setDb(await api.db());
+        notify(t('Restored database backup ({count} materials).', { count: result.meta.n }));
+        return;
+      }
       const d = JSON.parse(new TextDecoder().decode(await readBuf(f)));
       if (!d || typeof d.items !== 'object') throw new Error(t('brak pola "items"'));
-      setPending({ db: d, kind: 'json', name: f.name, keepManual: false });
+      setPending({
+        db: d,
+        kind: f.name.toLocaleLowerCase().includes('ppwr') ? 'ppwr' : 'json',
+        name: f.name,
+        keepManual: false,
+      });
     } catch (e) { notify(t('Błąd JSON: {error}', { error: e.message }), 'error'); }
   };
 
@@ -114,9 +128,11 @@ export default function App() {
               <HelperView db={db} onEditRecord={openEditor} onNewRecord={openNew} notify={notify} />
             </div>
             {view === 'db' && <DatabaseView db={db} onEdit={openEditor} onDelete={quickDelete} onNew={() => openNew()} />}
+            {view === 'packing' && <PackingView db={db} onEdit={openEditor} onDelete={quickDelete} onNew={openNew} notify={notify} />}
+            {view === 'documents' && <DocumentsView db={db} notify={notify} />}
           </>
         )}
-        {view === 'backups' && <BackupView notify={notify} />}
+        {view === 'backups' && <BackupView notify={notify} onImportFile={onImportJson} />}
       </main>
 
       {editing && db && (
@@ -156,6 +172,12 @@ function ImportDialog({ pending, current, onClose, onDone, notify }) {
   const go = async () => {
     setBusy(true);
     try {
+      if (pending.kind === 'ppwr') {
+        const result = await api.replacePpwrDb(pending.db);
+        onDone(current, current);
+        notify(t('Imported PPWR records ({count}).', { count: result.items }));
+        return;
+      }
       const items = { ...next };
       if (keep) manual.forEach(([k, it]) => { items[k] = it; });
       const body = { ...pending.db, items, n: Object.keys(items).length };

@@ -1,16 +1,17 @@
-import { useEffect, useState } from 'react';
-import { Archive, Download, FileJson, FileSpreadsheet, Loader2, RefreshCw, Server, Trash2 } from 'lucide-react';
-import { api, backupFileUrl } from '../api.js';
+import { useEffect, useRef, useState } from 'react';
+import { Archive, Download, FileJson, FileSpreadsheet, Loader2, RefreshCw, Server, Trash2, Upload } from 'lucide-react';
+import { api, BACKUP_ZIP_URL, DOCUMENTS_BACKUP_URL, DOCUMENT_LINKS_BACKUP_URL, MATERIALS_BACKUP_URL, PPWR_BACKUP_URL, backupFileUrl } from '../api.js';
 import { fmtSize } from '../lib/utils.js';
 import { btnGhost, btnPrimary, panel } from '../components/ui/styles.js';
 import { useI18n } from '../lib/i18n-context.js';
 import { reachCompliance } from '../lib/rcd.js';
 
-export default function BackupView({ notify }) {
+export default function BackupView({ notify, onImportFile }) {
   const { t, language } = useI18n();
   const [backups, setBackups] = useState(null);
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(null);
+  const importRef = useRef(null);
 
   const downloadDatabaseCsv = async () => {
     try {
@@ -121,11 +122,31 @@ export default function BackupView({ notify }) {
 
       <section className={`${panel} mb-5 flex flex-wrap items-center gap-3 p-4`}>
         <span className="mr-auto text-sm font-medium text-zinc-200">{t('Pobierz aktualną bazę:')}</span>
-        <a href="/api/backup" download className={btnGhost}>
-          <FileJson size={15} /> JSON
+        <a href={BACKUP_ZIP_URL} download className={btnPrimary}>
+          <Archive size={15} /> ZIP
+        </a>
+        <a href={MATERIALS_BACKUP_URL} download className={btnGhost}>
+          <FileJson size={15} /> {t('Materials JSON')}
+        </a>
+        <a href={PPWR_BACKUP_URL} download className={btnGhost}>
+          <FileJson size={15} /> PPWR JSON
+        </a>
+        <a href={DOCUMENTS_BACKUP_URL} download className={btnGhost}>
+          <FileJson size={15} /> {t('Documents JSON')}
+        </a>
+        <a href={DOCUMENT_LINKS_BACKUP_URL} download className={btnGhost}>
+          <FileJson size={15} /> {t('Document links JSON')}
         </a>
         <button type="button" onClick={downloadDatabaseCsv} className={btnGhost}>
           <FileSpreadsheet size={15} /> CSV
+        </button>
+        <input ref={importRef} type="file" accept=".zip,.json,application/zip,application/json" hidden onChange={event => {
+          const file = event.target.files?.[0];
+          event.target.value = '';
+          if (file) onImportFile(file);
+        }} />
+        <button type="button" onClick={() => importRef.current?.click()} className={btnGhost}>
+          <Upload size={15} /> {t('Import JSON / ZIP')}
         </button>
       </section>
 
