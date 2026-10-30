@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, FileText, Link2, Loader2, Plus, Search, Trash2 } from 'lucide-react';
 import { api } from '../../api.js';
 import { useI18n } from '../../lib/i18n-context.js';
+import { fold } from '../../lib/utils.js';
 import { btnGhost, input } from '../ui/styles.js';
 
 export default function MaterialDocuments({ materialKey, material, notify }) {
@@ -10,7 +11,6 @@ export default function MaterialDocuments({ materialKey, material, notify }) {
   const [documents, setDocuments] = useState([]);
   const [library, setLibrary] = useState([]);
   const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -40,13 +40,17 @@ export default function MaterialDocuments({ materialKey, material, notify }) {
 
   const linkedIds = useMemo(() => new Set(documents.map(document => document.i)), [documents]);
   const options = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
+    const needle = fold(query.trim());
+    if (!needle) return [];
     return library.filter(document => !linkedIds.has(document.i)
-      && (!needle || [
+      && [
         document.n,
-        ...document.materials,
-        ...document.materials.map(key => `${key} ${material?.items?.[key]?.d || ''}`),
-      ].join(' ').toLocaleLowerCase().includes(needle)));
+        ...document.materials.flatMap(key => {
+          const item = material?.items?.[key];
+          return [key, item?.i, item?.d, item?.sup].filter(Boolean);
+        }),
+      ].some(value => fold(value).includes(needle)))
+      .slice(0, 10);
   }, [library, linkedIds, material, query]);
 
   if (!materialKey) {
@@ -59,7 +63,6 @@ export default function MaterialDocuments({ materialKey, material, notify }) {
     try {
       await api.linkDocument(materialKey, documentId);
       await refresh();
-      setSelected('');
       setQuery('');
     } catch (cause) {
       setError(cause.message);
@@ -109,32 +112,38 @@ export default function MaterialDocuments({ materialKey, material, notify }) {
   return (
     <div className="space-y-3">
       {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
-      <div className="flex flex-wrap gap-2">
-        <div className="relative min-w-48 flex-1">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
-          <input
-            className={`${input} pl-8`}
-            value={query}
-            onChange={event => setQuery(event.target.value)}
-            placeholder={t('Search document library…')}
-            aria-label={t('Search document library')}
-          />
-        </div>
-        <select
-          className={`${input} min-w-48 flex-1`}
-          value={selected}
-          onChange={event => setSelected(event.target.value)}
-          aria-label={t('Select a document to link')}
-        >
-          <option value="">{t('Select a document')}</option>
-          {options.map(document => (
-            <option key={document.i} value={document.i}>{document.n}</option>
-          ))}
-        </select>
-        <button type="button" className={btnGhost} disabled={!selected || busy} onClick={() => link(selected)}>
-          {busy ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
-          {t('Link document')}
-        </button>
+      <div className="relative">
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+        <input
+          className={`${input} pl-8`}
+          value={query}
+          onChange={event => setQuery(event.target.value)}
+          placeholder={t('Search document library…')}
+          aria-label={t('Search document library')}
+        />
+      </div>
+      {query.trim() ? (
+        options.length ? (
+          <ul className="divide-y divide-zinc-800 rounded-lg border border-zinc-800">
+            {options.map(document => (
+              <li key={document.i} className="flex items-center gap-2 px-3 py-2 text-xs">
+                <FileText size={14} className="shrink-0 text-red-300" />
+                <span className="min-w-0 flex-1 truncate text-zinc-200" title={document.n}>{document.n}</span>
+                <span className="shrink-0 text-zinc-500">{t('Linked to {count} materials', { count: document.materials.length })}</span>
+                <button type="button" className={btnGhost} disabled={busy} onClick={() => link(document.i)}>
+                  {busy ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
+                  {t('Link document')}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-[11px] text-zinc-500">{t('No documents match your search.')}</p>
+        )
+      ) : (
+        <p className="text-[11px] text-zinc-500">{t('Type to search the document library.')}</p>
+      )}
+      <div className="flex">
         <input
           ref={fileRef}
           type="file"

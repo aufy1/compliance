@@ -158,12 +158,6 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
             <Label>{tr('Opis (DESC)')}</Label>
             <input className={input} value={f.d} onChange={e => set('d')(e.target.value)} placeholder="np. CBL 2x0.75mm2 H05VV-F BLK" />
           </div>
-          <div className="md:col-span-6">
-            <label className="inline-flex items-center gap-2 text-xs text-zinc-300">
-              <input type="checkbox" checked={f.packing} onChange={e => set('packing')(e.target.checked)} className="h-3.5 w-3.5 accent-indigo-500" />
-              {tr('Packing material')}
-            </label>
-          </div>
           <div className="md:col-span-3">
             <Label>{tr('Dostawca / producent')}</Label>
             <input className={input} list="dl-sup" value={f.sup} onChange={e => set('sup')(e.target.value)} />
@@ -186,9 +180,6 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
               onChange={e => set('rn')(e.target.value.replace(/\D/g, ''))} placeholder="e.g. 253" />
           </div>
         </div>
-
-        <SectionTitle>{tr('Documents')}</SectionTitle>
-        <MaterialDocuments materialKey={editing.key} material={db} notify={notify} />
 
         <SectionTitle right={
           <div className="flex gap-2">
@@ -279,6 +270,16 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
             <textarea className={cx(input, 'h-20 resize-y')} value={f.w} onChange={e => set('w')(e.target.value)} />
           </div>
         </div>
+
+        <div className="mt-5 border-t border-zinc-800 pt-4">
+          <label className="inline-flex items-center gap-2 text-xs text-zinc-300">
+            <input type="checkbox" checked={f.packing} onChange={e => set('packing')(e.target.checked)} className="h-3.5 w-3.5 accent-indigo-500" />
+            {tr('Packing material')}
+          </label>
+        </div>
+
+        <SectionTitle>{tr('Documents')}</SectionTitle>
+        <MaterialDocuments materialKey={editing.key} material={db} notify={notify} />
 
         <datalist id="dl-sup">{lists.sup.map(v => <option key={v} value={v} />)}</datalist>
         <datalist id="dl-r">{lists.r.map(v => <option key={v} value={v} />)}</datalist>
