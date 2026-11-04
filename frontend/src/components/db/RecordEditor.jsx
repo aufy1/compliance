@@ -49,6 +49,11 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
   const [substanceSearchOpen, setSubstanceSearchOpen] = useState({});
   const set = k => v => setF(p => ({ ...p, [k]: v }));
   const setRow = (u, patch) => setF(p => ({ ...p, h: p.h.map(x => (x.uid === u ? { ...x, ...patch } : x)) }));
+  const addSubstance = () => {
+    const rowId = ++uid;
+    setF(p => ({ ...p, h: [...p.h, { uid: rowId, id: '', s: 'd', ev: '' }] }));
+    setSubstanceSearchOpen(open => ({ ...open, [rowId]: true }));
+  };
   const substanceOptions = useMemo(() => ASSIGNABLE_GROUPS.flatMap(group => group.items.map(item => ({
     id: item.id,
     label: language === 'en' ? item.en || item.n : item.n,
@@ -184,7 +189,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
         <SectionTitle right={
           <div className="flex gap-2">
             <button type="button" className={cx(btnGhost, 'py-1.5')} onClick={suggest} title={tr('Uruchamia klasyfikator z helpera na opisie i statusie RoHS')}><Sparkles size={13} className="text-amber-400" /> {tr('Sugeruj z opisu')}</button>
-            <button type="button" className={cx(btnGhost, 'py-1.5')} onClick={() => setF(p => ({ ...p, h: [...p.h, { uid: ++uid, id: '', s: 'd', ev: '' }] }))}><Plus size={13} /> {tr('Dodaj substancję')}</button>
+            <button type="button" className={cx(btnGhost, 'py-1.5')} onClick={addSubstance}><Plus size={13} /> {tr('Dodaj substancję')}</button>
           </div>
         }>{tr('Substancje → odpowiedzi w ankiecie RCD')}</SectionTitle>
         <div className="space-y-2">
@@ -217,7 +222,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
                     : cx(input, dupIds.includes(x.id) && 'border-red-500')}
                   placeholder={tr('Szukaj substancji po nazwie lub CAS')}
                   autoComplete="off"
-                  autoFocus={Boolean(x.id && substanceSearchOpen[x.uid])}
+                  autoFocus={Boolean(substanceSearchOpen[x.uid])}
                 />
                 {showSuggestions && matchingSubstances(searchTerm).length > 0 && (
                   <div className="absolute left-0 right-0 top-full z-[60] mt-1 max-h-56 overflow-auto rounded-lg border border-zinc-700 bg-zinc-900 p-1 shadow-xl">

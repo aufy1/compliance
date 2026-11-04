@@ -65,7 +65,8 @@ nginx/     reverse proxy /api → FastAPI and / → Vite
 | GET | `/api/ppwr` | PPWR database |
 | POST | `/api/ppwr/items/:key` | Save compact PPWR data for a packing material |
 | GET | `/api/documents` | Shared PDF document library with linked material keys |
-| POST | `/api/documents` | Add a PDF to the library (20 MB max; duplicate content reuses the existing document) |
+| POST | `/api/documents` | Add a PDF with its display name, type, and optional declaration date (20 MB max; duplicate content reuses the existing document) |
+| POST | `/api/documents/:id/metadata` | Update a PDF's display name, type, and declaration date |
 | POST | `/api/materials/:key/documents/:id/link` | Link a PDF document to any material |
 | POST | `/api/materials/:key/documents/:id/unlink` | Remove a document link from a material |
 | POST | `/api/documents/:id/rename` | Rename a shared PDF document |
@@ -100,4 +101,4 @@ PPWR data is stored separately in `rcd-data/ppwr_material_db.json`. Its compact 
 
 PPWR fields: `t` packaging type, `w` packaging weight in grams, `m` manufacturer (MFG), `s` packaging stages (`p` primary, `s` secondary, `t` tertiary/grouped transport; multiple values are allowed), and `h` heavy-metals compliance (`u` not assessed, `c` compliant, `n` non-compliant). PDFs are independent of PPWR.
 
-The shared PDF document catalog is stored in `rcd-data/pdf_documents.json` as `{"documents":{"UUID":{"n":"declaration.pdf","z":12345,"h":"SHA-256"}}}`. The separate `rcd-data/material_document_links.json` stores material links as `{"items":{"ITEM":["UUID"]}}`. PDF bytes are stored in `rcd-data/documents/UUID.pdf`; ZIP backups include both JSON files and every PDF.
+The shared PDF document catalog is stored in `rcd-data/pdf_documents.json` as `{"documents":{"UUID":{"n":"declaration.pdf","z":12345,"h":"SHA-256","type":"PPWR","dt":"2026-11-02"}}}`. Document types include RCD, PPWR, RoHS, REACH, CA Prop 65, TSCA, PFAS, Specification (Specyfikacja), Drawing (Rysunek), and FMD; `dt` is the optional declaration date. The separate `rcd-data/material_document_links.json` stores material links as `{"items":{"ITEM":["UUID"]}}`. PDF bytes are stored in `rcd-data/documents/UUID.pdf`; ZIP backups include both JSON files and every PDF.

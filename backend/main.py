@@ -25,13 +25,30 @@ SEED_FILE = Path(
 )
 BACKUP_KEEP = max(1, int(os.environ.get("BACKUP_KEEP", "30")))
 MAX_BODY_BYTES = 64 * 1024 * 1024
-MAX_PPWR_PDF_BYTES = 20 * 1024 * 1024
+MAX_PDF_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_BACKUP_PDF_BYTES = 20 * 1024 * 1024
 MAX_BACKUP_ZIP_BYTES = 100 * 1024 * 1024
 MAX_BACKUP_UNPACKED_BYTES = 300 * 1024 * 1024
+MAX_DOCUMENT_NAME_LENGTH = 230
+DOCUMENT_TYPES = {
+    "RCD",
+    "PPWR",
+    "RoHS",
+    "REACH",
+    "CA Prop 65",
+    "TSCA",
+    "PFAS",
+    "Specification",
+    "Drawing",
+    "FMD",
+}
 PPWR_FILES_DIR = DATA_DIR / "ppwr_files"
 DOCUMENTS_FILE = DATA_DIR / "pdf_documents.json"
 DOCUMENT_LINKS_FILE = DATA_DIR / "material_document_links.json"
 DOCUMENTS_DIR = DATA_DIR / "documents"
+DOCUMENT_NAME_TIMESTAMP = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})__(?P<name>.+)$"
+)
 BACKUP_PATTERN = re.compile(
     r"^(?:material_db|rcd)_\d{8}_\d{6}_[a-f0-9-]+\.json$"
 )
@@ -61,6 +78,23 @@ def get_items(database: object) -> dict:
     return database["items"]
 
 
+def normalize_material_keys(database: dict) -> bool:
+    items = get_items(database)
+    normalized_items = {}
+    for key, item in items.items():
+        normalized_key = item_key(key)
+        if not normalized_key or normalized_key in normalized_items:
+            raise ValueError(f"Nieprawidłowy lub powtórzony klucz ITEM: {key}.")
+        normalized_items[normalized_key] = item
+
+    if normalized_items == items:
+        return False
+
+    database["items"] = normalized_items
+    database["n"] = len(normalized_items)
+    return True
+
+
 def get_meta(database: dict) -> dict:
     return {
         "n": len(get_items(database)),
@@ -71,6 +105,7 @@ def get_meta(database: dict) -> dict:
 
 
 def write_database(database: dict) -> None:
+    normalize_material_keys(database)
     write_json_file(DATABASE_FILE, database)
 
 
@@ -93,6 +128,7 @@ def read_database() -> dict:
         with DATABASE_FILE.open(encoding="utf-8") as file:
             database = json.load(file)
         get_items(database)
+        normalize_material_keys(database)
         return database
 
     with SEED_FILE.open(encoding="utf-8") as file:
@@ -151,10 +187,21 @@ def validate_document_database(value: object) -> dict:
             or not isinstance(document, dict)
             or not isinstance(document.get("n"), str)
             or not document["n"].strip()
-            or len(document["n"]) > 200
+            or len(document["n"]) > MAX_DOCUMENT_NAME_LENGTH
             or re.search(r"[\x00-\x1f\x7f]", document["n"])
             or type(document.get("z")) is not int
             or document["z"] < 0
+            or (
+                document.get("type") is not None
+                and (
+                    not isinstance(document.get("type"), str)
+                    or document.get("type") not in DOCUMENT_TYPES
+                )
+            )
+            or (
+                document.get("dt") is not None
+                and not is_document_date(document.get("dt"))
+            )
             or not isinstance(document.get("h"), str)
             or not re.fullmatch(r"[a-f0-9]{64}", document["h"])
         ):
@@ -163,8 +210,51 @@ def validate_document_database(value: object) -> dict:
             "n": document["n"].strip(),
             "z": document["z"],
             "h": document["h"],
+            "type": document.get("type"),
+            "dt": document.get("dt"),
         }
     return {"documents": documents}
+
+
+def is_document_date(value: object) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
+def validate_document_date(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    if not is_document_date(value):
+        raise HTTPException(400, "Podaj prawidłową datę deklaracji.")
+    return value
+
+
+def validate_document_type(value: object, required: bool = False) -> str | None:
+    if value is None or value == "":
+        if required:
+            raise HTTPException(400, "Wybierz typ dokumentu.")
+        return None
+    if not isinstance(value, str) or value not in DOCUMENT_TYPES:
+        raise HTTPException(400, "Nieprawidłowy typ dokumentu.")
+    return value
+
+
+def split_document_name(name: str) -> tuple[str, str | None]:
+    match = DOCUMENT_NAME_TIMESTAMP.fullmatch(name)
+    if not match:
+        return name, None
+    return match.group("name"), match.group("timestamp")
+
+
+def document_name_with_timestamp(name: str, timestamp: str | None = None) -> str:
+    if timestamp is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    return f"{timestamp}__{name}"
 
 
 def validate_document_links(value: object, documents: dict, materials: dict) -> dict:
@@ -547,7 +637,7 @@ def restore_backup_zip(data: bytes) -> dict:
             unpacked_size += info.file_size
             if unpacked_size > MAX_BACKUP_UNPACKED_BYTES:
                 raise HTTPException(413, "Rozpakowany ZIP przekracza limit 300 MB.")
-            if info.file_size > MAX_PPWR_PDF_BYTES and name.startswith(("ppwr_files/", "documents/")):
+            if info.file_size > MAX_BACKUP_PDF_BYTES and name.startswith(("ppwr_files/", "documents/")):
                 raise HTTPException(413, "Plik PDF w ZIP przekracza limit 20 MB.")
             entries[name] = info
 
@@ -584,6 +674,7 @@ def restore_backup_zip(data: bytes) -> dict:
             )
             if main_database is not None:
                 get_items(main_database)
+                normalize_material_keys(main_database)
                 embedded_ppwr = main_database.get("ppwr")
                 if ppwr_database is None and embedded_ppwr is not None:
                     raw_ppwr_database = embedded_ppwr
@@ -824,7 +915,7 @@ def get_ppwr_database() -> dict:
 @app.post("/api/ppwr/items/{key}")
 async def update_ppwr_item(key: str, request: Request) -> dict:
     key = item_key(key)
-    if not key or "/" in key:
+    if not key:
         raise HTTPException(400, "Nieprawidłowy klucz ITEM.")
     body = await read_json_body(request)
     item = validate_ppwr_item(body)
@@ -842,6 +933,11 @@ async def update_ppwr_item(key: str, request: Request) -> dict:
         database["items"][key] = item
         write_json_file(PPWR_DATABASE_FILE, database)
         return {"key": key, "item": item}
+
+
+@app.post("/api/ppwr/item")
+async def update_ppwr_item_by_key(key: str, request: Request) -> dict:
+    return await update_ppwr_item(key, request)
 
 
 @app.post("/api/ppwr/items/{key}/files")
@@ -924,7 +1020,7 @@ def download_document_links() -> JSONResponse:
 @app.get("/api/materials/{key}/documents")
 def get_material_documents(key: str) -> dict:
     key = item_key(key)
-    if not key or "/" in key:
+    if not key:
         raise HTTPException(400, "Nieprawidłowy klucz ITEM.")
     with database_lock:
         documents, links = get_document_stores()
@@ -938,16 +1034,28 @@ def get_material_documents(key: str) -> dict:
         }
 
 
+@app.get("/api/materials/documents")
+def get_material_documents_by_key(key: str) -> dict:
+    return get_material_documents(key)
+
+
 @app.post("/api/documents")
-async def upload_document(request: Request, filename: str = "") -> dict:
+async def upload_document(
+    request: Request,
+    filename: str = "",
+    document_type: str = "",
+    declaration_date: str = "",
+) -> dict:
+    document_type = validate_document_type(document_type, required=True)
+    declaration_date = validate_document_date(declaration_date)
     if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/pdf":
         raise HTTPException(415, "Dozwolone są wyłącznie pliki PDF.")
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > MAX_PPWR_PDF_BYTES:
-        raise HTTPException(413, "Plik PDF przekracza limit 20 MB.")
+    if content_length and int(content_length) > MAX_PDF_UPLOAD_BYTES:
+        raise HTTPException(413, "Plik PDF przekracza limit 5 MB.")
     content = await request.body()
-    if len(content) > MAX_PPWR_PDF_BYTES:
-        raise HTTPException(413, "Plik PDF przekracza limit 20 MB.")
+    if len(content) > MAX_PDF_UPLOAD_BYTES:
+        raise HTTPException(413, "Plik PDF przekracza limit 5 MB.")
     if not content.startswith(b"%PDF-"):
         raise HTTPException(400, "Plik nie ma prawidłowego nagłówka PDF.")
     name = Path(filename.replace("\\", "/")).name.strip()
@@ -966,6 +1074,19 @@ async def upload_document(request: Request, filename: str = "") -> dict:
         for document_id, metadata in documents["documents"].items():
             path = DOCUMENTS_DIR / f"{document_id}.pdf"
             if metadata["h"] == digest and path.is_file():
+                stored_name = document_name_with_timestamp(
+                    name, split_document_name(metadata["n"])[1]
+                )
+                if (
+                    metadata["n"] != stored_name
+                    or metadata["type"] != document_type
+                    or metadata["dt"] != declaration_date
+                ):
+                    metadata["n"] = stored_name
+                    metadata["type"] = document_type
+                    metadata["dt"] = declaration_date
+                    backup_before_change(read_database())
+                    write_json_file(DOCUMENTS_FILE, documents)
                 return {"document": {"i": document_id, **metadata}, "existing": True}
 
         document_id = str(uuid.uuid4())
@@ -979,9 +1100,11 @@ async def upload_document(request: Request, filename: str = "") -> dict:
                 os.fsync(file.fileno())
             temporary_file.replace(file_path)
             documents["documents"][document_id] = {
-                "n": name,
+                "n": document_name_with_timestamp(name),
                 "z": len(content),
                 "h": digest,
+                "type": document_type,
+                "dt": declaration_date,
             }
             backup_before_change(read_database())
             write_json_file(DOCUMENTS_FILE, documents)
@@ -996,10 +1119,73 @@ async def upload_document(request: Request, filename: str = "") -> dict:
         }
 
 
+@app.post("/api/documents/{document_id}/metadata")
+async def update_document_metadata(document_id: str, request: Request) -> dict:
+    if not re.fullmatch(r"[a-f0-9-]{36}", document_id):
+        raise HTTPException(400, "Nieprawidłowy identyfikator dokumentu.")
+    body = await read_json_body(request)
+    if (
+        not isinstance(body, dict)
+        or not isinstance(body.get("name"), str)
+        or "type" not in body
+        or "dt" not in body
+    ):
+        raise HTTPException(400, "Podaj nazwę, typ i datę deklaracji.")
+    name = Path(body["name"].replace("\\", "/")).name.strip()
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    if (
+        not name
+        or name.lower() == ".pdf"
+        or len(name) > 200
+        or not name.lower().endswith(".pdf")
+    ):
+        raise HTTPException(400, "Podaj prawidłową nazwę pliku PDF.")
+    document_type = validate_document_type(body["type"], required=True)
+    declaration_date = validate_document_date(body["dt"])
+    with database_lock:
+        documents, _ = get_document_stores()
+        metadata = documents["documents"].get(document_id)
+        if metadata is None or not (DOCUMENTS_DIR / f"{document_id}.pdf").is_file():
+            raise HTTPException(404, "Nie znaleziono dokumentu PDF.")
+        _, timestamp = split_document_name(metadata["n"])
+        stored_name = document_name_with_timestamp(name, timestamp)
+        if (
+            metadata["n"] != stored_name
+            or metadata["type"] != document_type
+            or metadata["dt"] != declaration_date
+        ):
+            backup_before_change(read_database())
+            metadata["n"] = stored_name
+            metadata["type"] = document_type
+            metadata["dt"] = declaration_date
+            write_json_file(DOCUMENTS_FILE, documents)
+        return {"document": {"i": document_id, **metadata}}
+
+
+@app.post("/api/documents/{document_id}/type")
+async def update_document_type(document_id: str, request: Request) -> dict:
+    if not re.fullmatch(r"[a-f0-9-]{36}", document_id):
+        raise HTTPException(400, "Nieprawidłowy identyfikator dokumentu.")
+    body = await read_json_body(request)
+    if not isinstance(body, dict) or "type" not in body:
+        raise HTTPException(400, "Podaj typ dokumentu.")
+    document_type = validate_document_type(body["type"])
+    with database_lock:
+        documents, _ = get_document_stores()
+        metadata = documents["documents"].get(document_id)
+        if metadata is None or not (DOCUMENTS_DIR / f"{document_id}.pdf").is_file():
+            raise HTTPException(404, "Nie znaleziono dokumentu PDF.")
+        if metadata["type"] != document_type:
+            backup_before_change(read_database())
+            metadata["type"] = document_type
+            write_json_file(DOCUMENTS_FILE, documents)
+        return {"document": {"i": document_id, **metadata}}
+
+
 @app.post("/api/materials/{key}/documents/{document_id}/link")
 def link_document_to_material(key: str, document_id: str) -> dict:
     key = item_key(key)
-    if not key or "/" in key or not re.fullmatch(r"[a-f0-9-]{36}", document_id):
+    if not key or not re.fullmatch(r"[a-f0-9-]{36}", document_id):
         raise HTTPException(400, "Nieprawidłowy materiał lub dokument.")
     with database_lock:
         materials = get_items(read_database())
@@ -1017,10 +1203,15 @@ def link_document_to_material(key: str, document_id: str) -> dict:
         return {"key": key, "document": {"i": document_id, **documents["documents"][document_id]}}
 
 
+@app.post("/api/materials/documents/{document_id}/link")
+def link_document_to_material_by_key(document_id: str, key: str) -> dict:
+    return link_document_to_material(key, document_id)
+
+
 @app.post("/api/materials/{key}/documents/{document_id}/unlink")
 def unlink_document_from_material(key: str, document_id: str) -> dict:
     key = item_key(key)
-    if not key or "/" in key or not re.fullmatch(r"[a-f0-9-]{36}", document_id):
+    if not key or not re.fullmatch(r"[a-f0-9-]{36}", document_id):
         raise HTTPException(400, "Nieprawidłowy materiał lub dokument.")
     with database_lock:
         documents, links = get_document_stores()
@@ -1033,6 +1224,11 @@ def unlink_document_from_material(key: str, document_id: str) -> dict:
             del links["items"][key]
         write_json_file(DOCUMENT_LINKS_FILE, links)
         return {"key": key, "documents": material_links}
+
+
+@app.post("/api/materials/documents/{document_id}/unlink")
+def unlink_document_from_material_by_key(document_id: str, key: str) -> dict:
+    return unlink_document_from_material(key, document_id)
 
 
 @app.post("/api/documents/{document_id}/rename")
@@ -1056,9 +1252,11 @@ async def rename_document(document_id: str, request: Request) -> dict:
         metadata = documents["documents"].get(document_id)
         if metadata is None or not (DOCUMENTS_DIR / f"{document_id}.pdf").is_file():
             raise HTTPException(404, "Nie znaleziono dokumentu PDF.")
-        if metadata["n"] != name:
+        _, timestamp = split_document_name(metadata["n"])
+        stored_name = document_name_with_timestamp(name, timestamp) if timestamp else name
+        if metadata["n"] != stored_name:
             backup_before_change(read_database())
-            metadata["n"] = name
+            metadata["n"] = stored_name
             write_json_file(DOCUMENTS_FILE, documents)
         return {"document": {"i": document_id, **metadata}}
 
@@ -1258,7 +1456,7 @@ async def create_item(request: Request) -> dict:
 @app.post("/api/items/{key}")
 async def update_item(key: str, request: Request) -> dict:
     key = item_key(key)
-    if not key or "/" in key:
+    if not key:
         raise HTTPException(400, "Nieprawidłowy klucz ITEM.")
     body = await read_json_body(request)
     item = validate_item(body.get("item") if isinstance(body, dict) else None)
@@ -1307,11 +1505,16 @@ async def update_item(key: str, request: Request) -> dict:
         }
 
 
+@app.post("/api/items/by-key/update")
+async def update_item_by_key(key: str, request: Request) -> dict:
+    return await update_item(key, request)
+
+
 @app.delete("/api/items/{key}")
 @app.post("/api/items/{key}/delete")
 def delete_item(key: str) -> dict:
     key = item_key(key)
-    if not key or "/" in key:
+    if not key:
         raise HTTPException(400, "Nieprawidłowy klucz ITEM.")
     with database_lock:
         database = read_database()
@@ -1330,6 +1533,11 @@ def delete_item(key: str) -> dict:
         return {"meta": get_meta(database)}
 
 
+@app.post("/api/items/by-key/delete")
+def delete_item_by_key(key: str) -> dict:
+    return delete_item(key)
+
+
 @app.put("/api/db")
 @app.post("/api/db")
 async def replace_database(request: Request) -> dict:
@@ -1346,13 +1554,18 @@ async def replace_database(request: Request) -> dict:
         ppwr_database = validate_ppwr_database(body["ppwr"]) if "ppwr" in body else None
         if any(not isinstance(item, dict) for item in body["items"].values()):
             raise HTTPException(400, "Rekord w bazie ma nieprawidłowy format.")
+        imported_database = {"items": body["items"]}
+        try:
+            normalize_material_keys(imported_database)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
         items = {
             key: {
                 field: value
                 for field, value in item.items()
                 if field not in REMOVED_ITEM_FIELDS
             }
-            for key, item in body["items"].items()
+            for key, item in imported_database["items"].items()
         }
         ppwr_database = ppwr_database or previous_ppwr
         if "ppwr" in body:

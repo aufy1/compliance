@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Boxes, ChevronDown, ChevronRight, Loader2, Package, PackageOpen, RefreshCw, Save, Search, X } from 'lucide-react';
 import { api } from '../api.js';
 import { useI18n } from '../lib/i18n-context.js';
+import { DOCUMENTS_UPDATED_EVENT, documentAddedAt, documentName } from '../lib/documents.js';
 import { btnGhost, btnPrimary, input } from '../components/ui/styles.js';
 
 const STAGES = [
@@ -18,22 +19,27 @@ const toForm = (item, material) => ({
 });
 
 export default function PackingView({ db, onEdit, onNew, notify }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [data, setData] = useState(null);
+  const [documents, setDocuments] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [drafts, setDrafts] = useState({});
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(() => new Set());
   const [reload, setReload] = useState(0);
   const [query, setQuery] = useState('');
+  const [ppwrFilter, setPpwrFilter] = useState('all');
   const [expanded, setExpanded] = useState(null);
+  const locale = language === 'en' ? 'en-US' : 'pl-PL';
 
   useEffect(() => {
     let active = true;
     setLoadError('');
-    api.ppwr()
-      .then(result => {
-        if (active) setData(result);
+    Promise.all([api.ppwr(), api.documents()])
+      .then(([ppwrResult, documentResult]) => {
+        if (!active) return;
+        setData(ppwrResult);
+        setDocuments(documentResult.documents);
       })
       .catch(error => {
         if (active) setLoadError(error.message);
@@ -41,16 +47,28 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
     return () => { active = false; };
   }, [reload]);
 
+  useEffect(() => {
+    const refreshDocuments = () => setReload(value => value + 1);
+    window.addEventListener(DOCUMENTS_UPDATED_EVENT, refreshDocuments);
+    return () => window.removeEventListener(DOCUMENTS_UPDATED_EVENT, refreshDocuments);
+  }, []);
+
+  const ppwrMaterials = useMemo(() => new Set(
+    (documents || []).filter(document => document.type === 'PPWR')
+      .flatMap(document => document.materials),
+  ), [documents]);
   const items = useMemo(() => Object.entries(db.items)
     .filter(([, item]) => item.packing)
     .sort(([, left], [, right]) => left.i.localeCompare(right.i, undefined, { numeric: true }))
     .map(([key, item]) => ({ key, item }))
     .filter(({ key, item }) => {
+        if (ppwrFilter === 'with' && !ppwrMaterials.has(key)) return false;
+        if (ppwrFilter === 'without' && ppwrMaterials.has(key)) return false;
         const haystack = [
           key, item.i, item.d, item.sup, data?.items?.[key]?.m, data?.items?.[key]?.t,
         ].filter(Boolean).join(' ').toLocaleLowerCase();
       return haystack.includes(query.trim().toLocaleLowerCase());
-    }), [db, data, query]);
+    }), [db, data, ppwrFilter, ppwrMaterials, query]);
   const manufacturers = useMemo(() => [...new Set(Object.values(db.items)
     .map(item => typeof item.sup === 'string' ? item.sup.trim() : '')
     .filter(Boolean))].sort((left, right) => left.localeCompare(right)), [db]);
@@ -107,7 +125,7 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
     }
   };
 
-  if (!data && loadError) {
+  if (loadError) {
     return (
       <div className="flex min-h-64 flex-col items-center justify-center gap-3 p-6 text-sm">
         <div className="flex items-center gap-2 text-red-300"><AlertTriangle size={17} />{t('Could not load PPWR data: {error}', { error: loadError })}</div>
@@ -118,7 +136,7 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
     );
   }
 
-  if (!data) {
+  if (!data || !documents) {
     return <div className="flex min-h-64 items-center justify-center gap-2 p-6 text-sm text-zinc-500"><Loader2 size={17} className="animate-spin" />{t('Loading PPWR data…')}</div>;
   }
 
@@ -137,21 +155,29 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
         </button>
       </header>
 
-      <div className="relative max-w-xl">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
-        <input
-          value={query}
-          onChange={event => setQuery(event.target.value)}
-          className={`${input} pl-9 ${query ? 'pr-9' : ''}`}
-          placeholder={t('Search packing materials by ITEM, description or MFG…')}
-          aria-label={t('Search packing materials')}
-        />
-        {query && <button type="button" onClick={() => setQuery('')} aria-label={t('Clear search')} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"><X size={15} /></button>}
+      <div className="flex max-w-3xl flex-col gap-2 sm:flex-row">
+        <div className="relative min-w-0 flex-1">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+          <input
+            value={query}
+            onChange={event => setQuery(event.target.value)}
+            className={`${input} pl-9 ${query ? 'pr-9' : ''}`}
+            placeholder={t('Search packing materials by ITEM, description or MFG…')}
+            aria-label={t('Search packing materials')}
+          />
+          {query && <button type="button" onClick={() => setQuery('')} aria-label={t('Clear search')} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"><X size={15} /></button>}
+        </div>
+        <select className={`${input} sm:w-64`} value={ppwrFilter} onChange={event => setPpwrFilter(event.target.value)} aria-label={t('Filter PPWR declarations')}>
+          <option value="all">{t('All PPWR declaration statuses')}</option>
+          <option value="with">{t('With PPWR declaration')}</option>
+          <option value="without">{t('Without PPWR declaration')}</option>
+        </select>
       </div>
 
       <div className="grid gap-3">
         {items.map(({ key, item }) => {
           const ppwrItem = data.items[key];
+          const declarations = documents.filter(document => document.type === 'PPWR' && document.materials.includes(key));
           const form = drafts[key] || toForm(ppwrItem, item);
           const isExpanded = expanded === key;
           return (
@@ -174,6 +200,20 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
 
               {isExpanded && (
                 <div className="border-t border-zinc-800 p-4">
+                  <section className="mb-4">
+                    <h3 className="mb-2 text-xs font-semibold text-zinc-300">{t('PPWR declarations')}</h3>
+                    {declarations.length ? (
+                      <ul className="space-y-1.5">
+                        {declarations.map(document => (
+                          <li key={document.i} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                            <a className="text-indigo-300 hover:underline" href={api.documentUrl(document.i)} target="_blank" rel="noreferrer">{documentName(document.n)}</a>
+                            {document.dt && <span className="text-zinc-500">{t('Declaration date')}: {document.dt}</span>}
+                            {documentAddedAt(document.n, locale) && <span className="text-zinc-500">{t('Added')}: {documentAddedAt(document.n, locale)}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : <p className="text-xs text-zinc-500">{t('No PPWR declarations linked to this material.')}</p>}
+                  </section>
                   <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     <label className="space-y-1 text-xs text-zinc-400">
                       <span>{t('Packaging type')}</span>
@@ -225,7 +265,9 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
         })}
         {!items.length && (
           <div className="rounded-xl border border-dashed border-zinc-800 px-4 py-12 text-center text-sm text-zinc-500">
-            {query ? t('No packing materials match your search.') : t('No packaging materials yet. Mark a material as a packing material to see it here.')}
+            {query || ppwrFilter !== 'all'
+              ? t('No packing materials match the selected filters.')
+              : t('No packaging materials yet. Mark a material as a packing material to see it here.')}
           </div>
         )}
       </div>
