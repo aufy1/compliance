@@ -51,6 +51,21 @@ export function countHits(db) {
   return c;
 }
 
+export function bomLookupTokens(text) {
+  const tokens = new Set();
+  text.split(/\r?\n/).forEach(line => {
+    if (!line.trim()) return;
+    const trimmedLine = line.trim();
+    const levelMatch = trimmedLine.match(/^(?:(?:__\s*)+)/);
+    const content = levelMatch ? trimmedLine.slice(levelMatch[0].length).trim() : trimmedLine;
+    const cells = content.split('\t').map(cell => cell.trim()).filter(Boolean);
+    [...cells, content, ...content.split(/[\s,;\t]+/)]
+      .filter(token => token && token.replace(/[^A-Za-z0-9]/g, '').length >= 4)
+      .forEach(token => tokens.add(token));
+  });
+  return [...tokens];
+}
+
 export function reachVersion(item) {
   const version = item.rn;
   return version == null ? '' : String(version);

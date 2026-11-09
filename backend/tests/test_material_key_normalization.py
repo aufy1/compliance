@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 from unittest import mock
 
@@ -13,6 +14,7 @@ class Request:
     def __init__(self, body, headers=None):
         self._body = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.headers = headers or {}
+        self.state = SimpleNamespace(username="tester")
 
     async def body(self):
         return self._body
@@ -37,7 +39,7 @@ async def asgi_request(method, url, body=None):
         "headers": headers,
         "client": ("127.0.0.1", 12345),
         "server": ("testserver", 80),
-        "state": {},
+        "state": {"username": "tester"},
     }
     received = False
     response = {"body": bytearray()}
@@ -86,7 +88,6 @@ class MaterialKeyNormalizationTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(main, "DATA_DIR", data_path),
             mock.patch.object(main, "DATABASE_FILE", self.database_file),
-            mock.patch.object(main, "backup_before_change", return_value=None),
             mock.patch.object(main, "remove_ppwr_item"),
         ]
         for patcher in self.patches:
@@ -105,8 +106,27 @@ class MaterialKeyNormalizationTests(unittest.TestCase):
         )
 
         self.assertEqual(result["item"]["d"], "Updated material")
+        self.assertEqual(result["item"]["updatedBy"], "tester")
         stored = json.loads(self.database_file.read_text(encoding="utf-8"))
         self.assertEqual(list(stored["items"]), ["B954033GE321"])
+
+    def test_create_material_records_authenticated_editor(self):
+        result = asyncio.run(
+            main.create_item(Request({"item": {"i": "NEW-ITEM"}}))
+        )
+
+        self.assertEqual(result["item"]["updatedBy"], "tester")
+
+    def test_import_preview_keeps_manual_records_when_requested(self):
+        result = asyncio.run(main.preview_database_import(Request({
+            "items": {"NEW-ITEM": {"i": "NEW-ITEM"}},
+            "keepManual": True,
+        })))
+
+        self.assertEqual(result["manualCount"], 1)
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(result["count"], 2)
 
     def test_get_documents_for_material_with_legacy_spaced_key(self):
         with mock.patch.object(
@@ -185,6 +205,7 @@ class MaterialKeyNormalizationTests(unittest.TestCase):
 
         self.assertEqual(response["status"], 200)
         self.assertEqual(response["json"]["item"]["d"], "Updated material")
+        self.assertEqual(response["json"]["item"]["updatedBy"], "tester")
 
     def test_slash_key_can_list_and_link_documents(self):
         material_key = "B954033/GE321"

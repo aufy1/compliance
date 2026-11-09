@@ -6,7 +6,7 @@ import { DOCUMENT_TYPES, documentAddedAt, documentName, foldDocumentSearch, noti
 import DocumentFormModal from '../components/db/DocumentFormModal.jsx';
 import { btnGhost, btnPrimary, input, panel } from '../components/ui/styles.js';
 
-export default function DocumentsView({ db, notify }) {
+export default function DocumentsView({ notify }) {
   const { t, language } = useI18n();
   const locale = language === 'en' ? 'en-US' : 'pl-PL';
   const fileRef = useRef(null);
@@ -56,10 +56,13 @@ export default function DocumentsView({ db, notify }) {
         document.type || '',
         document.dt || '',
         ...document.materials,
-        ...document.materials.map(key => `${db.items[key]?.i || key} ${db.items[key]?.d || ''} ${db.items[key]?.sup || ''}`),
+        ...document.materials.map(key => {
+          const material = document.materialDetails?.[key];
+          return `${material?.i || key} ${material?.d || ''} ${material?.sup || ''}`;
+        }),
       ].join(' ')).includes(needle);
     });
-  }, [db, documents, filters, query]);
+  }, [documents, filters, query]);
 
   const selectFile = file => {
     if (!file) return;
@@ -210,7 +213,7 @@ export default function DocumentsView({ db, notify }) {
                     {document.type ? t(document.type) : t('Unassigned')} · {(document.z / 1024).toFixed(0)} KB
                     {document.dt && ` · ${t('Declaration date')}: ${document.dt}`}
                     {' · '}{t('Linked to {count} materials', { count: document.materials.length })}
-                    {document.materials.length > 0 && ` · ${document.materials.map(key => db.items[key]?.i || key).join(', ')}`}
+                    {document.materials.length > 0 && ` · ${document.materials.map(key => document.materialDetails?.[key]?.i || key).join(', ')}`}
                     {documentAddedAt(document.n, locale) && ` · ${t('Added')}: ${documentAddedAt(document.n, locale)}`}
                   </p>
                 </div>

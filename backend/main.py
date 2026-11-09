@@ -1,19 +1,27 @@
 import hashlib
 import json
+import logging
 import math
 import os
 import re
+import secrets
+import subprocess
 import threading
 import tempfile
+import unicodedata
 import uuid
 import zipfile
 from io import BytesIO
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
-from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
+
+import storage
+from auth_provider import LocalAuthenticationProvider
 
 BACKEND_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", BACKEND_DIR / "data"))
@@ -49,14 +57,237 @@ DOCUMENTS_DIR = DATA_DIR / "documents"
 DOCUMENT_NAME_TIMESTAMP = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})__(?P<name>.+)$"
 )
-BACKUP_PATTERN = re.compile(
+LEGACY_JSON_BACKUP_PATTERN = re.compile(
     r"^(?:material_db|rcd)_\d{8}_\d{6}_[a-f0-9-]+\.json$"
 )
-LEGACY_BACKUP_PATTERN = re.compile(r"^rcd_\d{8}_\d{6}_[a-f0-9-]+\.json$")
+POSTGRES_BACKUP_PATTERN = re.compile(
+    r"^postgresql_(?:daily|manual)_\d{8}_\d{6}_[a-f0-9-]+\.dump$"
+)
 REMOVED_ITEM_FIELDS = {"a", "rs", "rr", "rv", "re", "reach", "reachStatus"}
 
 app = FastAPI(title="Compliance RCD API")
 database_lock = threading.RLock()
+logger = logging.getLogger(__name__)
+SESSION_COOKIE = "compliance_session"
+SESSION_TTL_HOURS = 12
+
+
+@app.on_event("startup")
+def initialize_application() -> None:
+    if not storage.postgres_enabled():
+        raise RuntimeError("PostgreSQL must be configured before starting the API.")
+
+    username = os.environ.get("BOOTSTRAP_ADMIN_USERNAME", "").strip()
+    password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD", "")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9._@-]{1,80}", username)
+        or len(password) < 12
+        or len(password) > 256
+    ):
+        raise RuntimeError(
+            "Set a valid BOOTSTRAP_ADMIN_USERNAME and a "
+            "BOOTSTRAP_ADMIN_PASSWORD of 12–256 characters."
+        )
+
+    from pwdlib import PasswordHash
+
+    password_hasher = PasswordHash.recommended()
+    dummy_password_hash = password_hasher.hash(secrets.token_urlsafe(32))
+    app.state.authentication_provider = LocalAuthenticationProvider(
+        password_hasher, dummy_password_hash
+    )
+    storage.initialize(
+        DATA_DIR,
+        SEED_FILE,
+        username,
+        password_hasher.hash(password),
+    )
+
+
+def _session_cookie_secure() -> bool:
+    return os.environ.get("SESSION_COOKIE_SECURE", "true").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+@app.middleware("http")
+async def authenticate_and_audit(request: Request, call_next):
+    if not storage.postgres_enabled() or not request.url.path.startswith("/api/"):
+        return await call_next(request)
+
+    path = request.url.path
+    username = None
+    if path not in {"/api/health", "/api/auth/login"}:
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            username = storage.get_session_username(_token_hash(token))
+        if not username:
+            response = JSONResponse(
+                status_code=401, content={"detail": "Wymagane jest zalogowanie."}
+            )
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
+                storage.record_operation(
+                    None, request.method, path, response.status_code,
+                    request.headers.get("x-real-ip")
+                    or (request.client.host if request.client else None),
+                )
+            return response
+        request.state.username = username
+
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin")
+        if origin:
+            try:
+                origin_host = urlsplit(origin).netloc.casefold()
+            except ValueError:
+                origin_host = ""
+            request_host = (
+                request.headers.get("x-forwarded-host")
+                or request.headers.get("host", "")
+            ).casefold()
+            if not origin_host or origin_host != request_host:
+                response = JSONResponse(
+                    status_code=403, content={"detail": "Nieprawidłowe źródło żądania."}
+                )
+                storage.record_operation(
+                    username, request.method, path, response.status_code,
+                    request.headers.get("x-real-ip")
+                    or (request.client.host if request.client else None),
+                )
+                return response
+
+    if (
+        request.method not in {"GET", "HEAD", "OPTIONS"}
+        and path.startswith("/api/")
+        and path != "/api/auth/login"
+        and not path.startswith("/api/backups")
+    ):
+        try:
+            await run_in_threadpool(ensure_daily_postgres_backup)
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            logger.exception("Automatic PostgreSQL backup failed; write was blocked.")
+            response = JSONResponse(
+                status_code=503,
+                content={"detail": "Nie udało się utworzyć dziennej kopii PostgreSQL. Zmiana nie została zapisana."},
+            )
+            storage.record_operation(
+                username,
+                request.method,
+                path,
+                response.status_code,
+                request.headers.get("x-real-ip")
+                or (request.client.host if request.client else None),
+            )
+            return response
+
+    response = await call_next(request)
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        route = request.scope.get("route")
+        action = getattr(route, "path", path)
+        username = getattr(request.state, "username", username)
+        storage.record_operation(
+            username,
+            request.method,
+            action,
+            response.status_code,
+            request.headers.get("x-real-ip")
+            or (request.client.host if request.client else None),
+        )
+    return response
+
+
+@app.post("/api/auth/login")
+async def login(request: Request, response: Response) -> dict:
+    body = await read_json_body(request)
+    if (
+        not isinstance(body, dict)
+        or not isinstance(body.get("username"), str)
+        or not isinstance(body.get("password"), str)
+        or len(body["username"]) > 80
+        or len(body["password"]) > 256
+    ):
+        raise HTTPException(400, "Podaj nazwę użytkownika i hasło.")
+    username = body["username"].strip()
+    if not request.app.state.authentication_provider.authenticate(
+        username, body["password"]
+    ):
+        raise HTTPException(401, "Nieprawidłowa nazwa użytkownika lub hasło.")
+
+    request.state.username = username
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=SESSION_TTL_HOURS)
+    storage.create_session(_token_hash(token), username, expires_at)
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_TTL_HOURS * 60 * 60,
+        httponly=True,
+        secure=_session_cookie_secure(),
+        samesite="strict",
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"user": {"username": username}}
+
+
+@app.get("/api/auth/me")
+def current_user(request: Request) -> dict:
+    return {"user": {"username": request.state.username}}
+
+
+@app.post("/api/auth/change-password")
+async def change_password(request: Request) -> dict:
+    body = await read_json_body(request)
+    if (
+        not isinstance(body, dict)
+        or not isinstance(body.get("currentPassword"), str)
+        or not isinstance(body.get("newPassword"), str)
+        or len(body["currentPassword"]) > 256
+        or not 12 <= len(body["newPassword"]) <= 256
+    ):
+        raise HTTPException(
+            400, "Podaj obecne hasło oraz nowe hasło o długości 12–256 znaków."
+        )
+
+    username = request.state.username
+    provider = request.app.state.authentication_provider
+    if not provider.authenticate(username, body["currentPassword"]):
+        raise HTTPException(400, "Obecne hasło jest nieprawidłowe.")
+
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise HTTPException(401, "Wymagane jest zalogowanie.")
+    password_hash = provider.password_hasher.hash(body["newPassword"])
+    storage.update_user_password(username, password_hash, _token_hash(token))
+    return {"changed": True}
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response) -> dict:
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        storage.delete_session(_token_hash(token))
+    response.delete_cookie(
+        SESSION_COOKIE,
+        httponly=True,
+        secure=_session_cookie_secure(),
+        samesite="strict",
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"loggedOut": True}
+
+
+@app.get("/api/audit")
+def get_audit_log(limit: int = Query(default=100, ge=1, le=500)) -> dict:
+    return {"operations": storage.list_operations(limit)}
 
 
 def utc_now() -> str:
@@ -104,12 +335,228 @@ def get_meta(database: dict) -> dict:
     }
 
 
+def fold_search(value: object) -> str:
+    text = str(value or "").casefold().replace("ł", "l")
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFD", text)
+        if not unicodedata.combining(character)
+    )
+
+
+def natural_sort_key(value: object) -> list[tuple[int, object]]:
+    return [
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in re.split(r"(\d+)", str(value or ""))
+    ]
+
+
+def item_array(item: dict, field: str) -> list:
+    value = item.get(field)
+    return value if isinstance(value, list) else []
+
+
+def item_object(item: dict, field: str) -> dict:
+    value = item.get(field)
+    return value if isinstance(value, dict) else {}
+
+
+def reach_status(item: dict) -> str:
+    if isinstance(item.get("rc"), bool):
+        return "compliant" if item["rc"] else "non-compliant"
+    states = (
+        "compliant_no_svhc",
+        "compliant_svhc",
+        "compliant_unspecified_svhc",
+        "svhc_verify",
+        "non_compliant",
+        "pending_verify",
+        "not_applicable",
+        "no_data",
+        "verify",
+    )
+    index = item.get("rs")
+    state = states[index] if type(index) is int and 0 <= index < len(states) else (
+        item_object(item, "re").get("s")
+    )
+    if state in states[:3]:
+        return "compliant"
+    if state == "non_compliant":
+        return "non-compliant"
+    return "unknown"
+
+
+def material_filter_value(key: str, item: dict, labels: dict | None = None) -> str:
+    labels = labels or {}
+    if key == "item":
+        return " ".join([key, str(item.get("i") or ""), *(str(value) for value in item_array(item, "al"))])
+    if key == "description":
+        return " ".join([str(item.get("d") or ""), *(str(value) for value in item_array(item, "w"))])
+    if key == "supplier":
+        return str(item.get("sup") or "")
+    if key == "rohs":
+        return " ".join([str(item.get("r") or ""), *(str(value) for value in item_array(item, "ex"))])
+    if key == "reach":
+        version = item.get("rn")
+        return f"{reach_status(item)} svhc {version}" if version is not None else reach_status(item)
+    if key == "date":
+        return str(item.get("dt") or "")
+    if key == "substances":
+        values = []
+        for substance_id, details in item_object(item, "h").items():
+            values.append(str(substance_id))
+            if substance_id in labels:
+                values.append(labels[substance_id])
+            if isinstance(details, list):
+                values.extend(str(value) for value in details if value)
+        return " ".join(values)
+    if key == "missing":
+        return " ".join(
+            " ".join([str(value), str(labels.get(value, ""))])
+            for value in item_array(item, "u")
+        )
+    return ""
+
+
+def filtered_material_items(database: dict, query: str, filters: dict) -> dict:
+    words = [fold_search(word) for word in query.strip().split() if word]
+    matches = {}
+    for key, item in get_items(database).items():
+        if not isinstance(item, dict):
+            continue
+        haystack = fold_search(" ".join([
+            key,
+            str(item.get("i") or ""),
+            str(item.get("d") or ""),
+            str(item.get("sup") or ""),
+            str(item.get("r") or ""),
+            material_filter_value("reach", item),
+            " ".join(str(value) for value in item_array(item, "al")),
+        ]))
+        if not all(word in haystack for word in words):
+            continue
+        include = True
+        for field, criteria in filters.items():
+            value = material_filter_value(field, item, criteria.get("labels"))
+            mode = criteria["mode"]
+            if mode == "empty" and value.strip():
+                include = False
+            elif mode == "nonempty" and not value.strip():
+                include = False
+            elif mode == "text":
+                terms = [fold_search(term) for term in criteria["query"].split() if term]
+                candidate = fold_search(value)
+                if field == "supplier" and criteria["match"] == "exact":
+                    include = not terms or candidate == " ".join(terms)
+                else:
+                    include = all(term in candidate for term in terms)
+            if not include:
+                break
+        if include:
+            matches[key] = item
+    return matches
+
+
+def validate_material_filters(raw_filters: str) -> dict:
+    try:
+        filters = json.loads(raw_filters)
+    except json.JSONDecodeError as error:
+        raise HTTPException(400, "Nieprawidłowe filtry bazy.") from error
+    allowed_fields = {
+        "item", "description", "supplier", "rohs", "reach", "date",
+        "substances", "missing",
+    }
+    if not isinstance(filters, dict) or set(filters) - allowed_fields:
+        raise HTTPException(400, "Nieprawidłowe filtry bazy.")
+    validated = {}
+    for field, criteria in filters.items():
+        mode = criteria.get("mode") if isinstance(criteria, dict) else None
+        match = criteria.get("match", "contains") if isinstance(criteria, dict) else None
+        if (
+            not isinstance(criteria, dict)
+            or not isinstance(mode, str)
+            or mode not in {"all", "empty", "nonempty", "text"}
+            or not isinstance(criteria.get("query", ""), str)
+            or len(criteria.get("query", "")) > 200
+            or not isinstance(match, str)
+            or match not in {"contains", "exact"}
+            or (
+                "labels" in criteria
+                and (
+                    not isinstance(criteria["labels"], dict)
+                    or len(criteria["labels"]) > 500
+                    or any(
+                        not isinstance(label, str) or len(label) > 200
+                        for label in criteria["labels"].values()
+                    )
+                )
+            )
+        ):
+            raise HTTPException(400, "Nieprawidłowy filtr bazy.")
+        validated[field] = {
+            "mode": mode,
+            "query": criteria.get("query", ""),
+            "match": match,
+            "labels": criteria.get("labels", {}),
+        }
+    return validated
+
+
+def material_sort_value(key: str, item: dict, sort: str):
+    if sort == "description":
+        return fold_search(item.get("d"))
+    if sort == "rohs":
+        return fold_search(item.get("r"))
+    if sort == "reach":
+        return fold_search(material_filter_value("reach", item))
+    if sort == "date":
+        value = str(item.get("dt") or "")
+        match = re.match(r"^(\d{2})\.(\d{2})\.(\d{4})", value)
+        return f"{match.group(3)}-{match.group(2)}-{match.group(1)}" if match else value
+    if sort == "substances":
+        return len(item_object(item, "h"))
+    if sort == "missing":
+        return len(item_array(item, "u"))
+    return natural_sort_key(key)
+
+
+def lookup_materials(tokens: list[str], database: dict) -> dict:
+    items = get_items(database)
+    exact = {item_key(key): key for key in items}
+    compact = {}
+    aliases = {}
+    for key, item in items.items():
+        normalized = re.sub(r"[^A-Z0-9]", "", key.upper()).lstrip("0")
+        if normalized:
+            compact.setdefault(normalized, key)
+        if not isinstance(item, dict):
+            continue
+        for alias in item_array(item, "al"):
+            normalized_alias = re.sub(r"[^A-Z0-9]", "", str(alias).upper()).lstrip("0")
+            if normalized_alias:
+                aliases.setdefault(normalized_alias, key)
+    found = {}
+    for token in tokens:
+        normalized_key = item_key(token)
+        key = exact.get(normalized_key)
+        if key is None:
+            normalized = re.sub(r"[^A-Z0-9]", "", token.upper()).lstrip("0")
+            key = compact.get(normalized) or aliases.get(normalized)
+        if key is not None:
+            found[key] = items[key]
+    return found
+
+
 def write_database(database: dict) -> None:
     normalize_material_keys(database)
     write_json_file(DATABASE_FILE, database)
 
 
 def write_json_file(path: Path, database: dict) -> None:
+    if storage.postgres_enabled():
+        storage.write_json(path.name, database)
+        return
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     temporary_file = DATA_DIR / f".{path.name}.{uuid.uuid4()}.tmp"
     try:
@@ -122,11 +569,19 @@ def write_json_file(path: Path, database: dict) -> None:
         temporary_file.unlink(missing_ok=True)
 
 
+def read_json_file(path: Path):
+    if storage.postgres_enabled():
+        return storage.read_json(path.name)
+    if not path.exists():
+        return None
+    with path.open(encoding="utf-8") as file:
+        return json.load(file)
+
+
 def read_database() -> dict:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if DATABASE_FILE.exists():
-        with DATABASE_FILE.open(encoding="utf-8") as file:
-            database = json.load(file)
+    database = read_json_file(DATABASE_FILE)
+    if database is not None:
         get_items(database)
         normalize_material_keys(database)
         return database
@@ -141,9 +596,8 @@ def read_database() -> dict:
 def read_ppwr_database() -> dict:
     ensure_legacy_pdf_migration()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if PPWR_DATABASE_FILE.exists():
-        with PPWR_DATABASE_FILE.open(encoding="utf-8") as file:
-            database = json.load(file)
+    database = read_json_file(PPWR_DATABASE_FILE)
+    if database is not None:
         if not isinstance(database, dict) or not isinstance(database.get("items"), dict):
             raise ValueError("Nieprawidłowy format bazy PPWR: brak obiektu items.")
         normalized = validate_ppwr_database(database)
@@ -155,22 +609,19 @@ def read_ppwr_database() -> dict:
     write_json_file(PPWR_DATABASE_FILE, database)
     return database
 
-
 def _read_document_database() -> dict:
-    if not DOCUMENTS_FILE.exists():
+    database = read_json_file(DOCUMENTS_FILE)
+    if database is None:
         return {"documents": {}}
-    with DOCUMENTS_FILE.open(encoding="utf-8") as file:
-        database = json.load(file)
     if not isinstance(database, dict) or not isinstance(database.get("documents"), dict):
         raise ValueError("Nieprawidłowa baza dokumentów PDF.")
     return database
 
 
 def _read_document_links() -> dict:
-    if not DOCUMENT_LINKS_FILE.exists():
+    links = read_json_file(DOCUMENT_LINKS_FILE)
+    if links is None:
         return {"items": {}}
-    with DOCUMENT_LINKS_FILE.open(encoding="utf-8") as file:
-        links = json.load(file)
     if not isinstance(links, dict) or not isinstance(links.get("items"), dict):
         raise ValueError("Nieprawidłowy plik powiązań dokumentów.")
     return links
@@ -280,11 +731,8 @@ def validate_document_links(value: object, documents: dict, materials: dict) -> 
 
 
 def ensure_legacy_pdf_migration() -> None:
-    if not PPWR_DATABASE_FILE.exists():
-        return
     try:
-        with PPWR_DATABASE_FILE.open(encoding="utf-8") as file:
-            raw_ppwr = json.load(file)
+        raw_ppwr = read_json_file(PPWR_DATABASE_FILE)
     except (OSError, json.JSONDecodeError):
         return
     if not isinstance(raw_ppwr, dict) or not isinstance(raw_ppwr.get("items"), dict):
@@ -527,90 +975,100 @@ def rename_ppwr_item(old_key: str, new_key: str) -> None:
 
 def list_backup_files() -> list[Path]:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    for legacy_path in BACKUP_DIR.iterdir():
-        if legacy_path.is_file() and LEGACY_BACKUP_PATTERN.fullmatch(legacy_path.name):
-            renamed_path = BACKUP_DIR / f"material_db_{legacy_path.name[4:]}"
-            if not renamed_path.exists():
-                legacy_path.rename(renamed_path)
     return sorted(
         (
             path
             for path in BACKUP_DIR.iterdir()
-            if path.is_file() and BACKUP_PATTERN.fullmatch(path.name)
+            if path.is_file() and POSTGRES_BACKUP_PATTERN.fullmatch(path.name)
         ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
 
 
+def list_postgres_backup_files() -> list[Path]:
+    return [
+        path
+        for path in list_backup_files()
+        if POSTGRES_BACKUP_PATTERN.fullmatch(path.name)
+    ]
+
+
 def prune_backups() -> None:
-    for path in list_backup_files()[BACKUP_KEEP:]:
+    for path in BACKUP_DIR.iterdir():
+        if path.is_file() and LEGACY_JSON_BACKUP_PATTERN.fullmatch(path.name):
+            path.unlink()
+    for path in list_postgres_backup_files()[BACKUP_KEEP:]:
         path.unlink()
 
 
-def create_backup(database: dict) -> str:
+def create_postgres_backup_or_503(automatic: bool = False) -> str:
+    try:
+        return create_postgres_backup(automatic=automatic)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+        logger.exception("PostgreSQL backup failed.")
+        raise HTTPException(
+            503,
+            "Nie udało się utworzyć kopii PostgreSQL.",
+        ) from error
+
+
+def create_postgres_backup(automatic: bool = False) -> str:
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    name = f"material_db_{timestamp}_{uuid.uuid4()}.json"
-    destination = BACKUP_DIR / name
-    with destination.open("x", encoding="utf-8") as file:
-        json.dump(
-            {**database, "ppwr": read_ppwr_database()},
-            file,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-    prune_backups()
-    return name
-
-
-def backup_before_change(database: dict, force: bool = False) -> str | None:
-    if not force:
-        today = datetime.now(timezone.utc).strftime("%Y%m%d")
-        if any(
-            path.name.startswith((f"material_db_{today}_", f"rcd_{today}_"))
-            for path in list_backup_files()
-        ):
-            return None
-    return create_backup(database)
-
-
-def backup_zip_path() -> Path:
+    backup_type = "daily" if automatic else "manual"
+    name = f"postgresql_{backup_type}_{timestamp}_{uuid.uuid4()}.dump"
     temporary = tempfile.NamedTemporaryFile(
-        prefix="material_backup_", suffix=".zip", delete=False
+        prefix=".postgresql_", suffix=".tmp", dir=BACKUP_DIR, delete=False
     )
     temporary_path = Path(temporary.name)
     temporary.close()
+    os.chmod(temporary_path, 0o600)
+
+    environment = os.environ.copy()
+    command = [
+        "pg_dump",
+        "--no-password",
+        "--format=custom",
+        "--compress=9",
+        "--host",
+        os.environ.get("PGHOST", ""),
+        "--port",
+        os.environ.get("PGPORT", "5432"),
+        "--username",
+        os.environ.get("PGUSER", ""),
+        "--dbname",
+        os.environ.get("PGDATABASE", ""),
+        "--file",
+        str(temporary_path),
+    ]
     try:
-        with zipfile.ZipFile(
-            temporary_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
-        ) as archive:
-            archive.writestr(
-                "rcd_material_db.json",
-                json.dumps(read_database(), ensure_ascii=False, separators=(",", ":")),
-            )
-            archive.writestr(
-                "ppwr_material_db.json",
-                json.dumps(read_ppwr_database(), ensure_ascii=False, separators=(",", ":")),
-            )
-            documents, links = get_document_stores()
-            archive.writestr(
-                "pdf_documents.json",
-                json.dumps(documents, ensure_ascii=False, separators=(",", ":")),
-            )
-            archive.writestr(
-                "material_document_links.json",
-                json.dumps(links, ensure_ascii=False, separators=(",", ":")),
-            )
-            for document_id, metadata in documents["documents"].items():
-                pdf_path = DOCUMENTS_DIR / f"{document_id}.pdf"
-                if not pdf_path.is_file():
-                    raise HTTPException(500, f"Nie znaleziono pliku PDF: {metadata['n']}.")
-                archive.write(pdf_path, f"documents/{document_id}.pdf")
-        return temporary_path
-    except Exception:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            timeout=3600,
+            env=environment,
+        )
+        with temporary_path.open("r+b") as dump_file:
+            os.fsync(dump_file.fileno())
+        destination = BACKUP_DIR / name
+        os.replace(temporary_path, destination)
+        prune_backups()
+        return name
+    finally:
         temporary_path.unlink(missing_ok=True)
-        raise
+
+
+def ensure_daily_postgres_backup() -> str | None:
+    with database_lock:
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        if any(
+            path.name.startswith(f"postgresql_daily_{today}_")
+            for path in list_postgres_backup_files()
+        ):
+            return None
+        return create_postgres_backup(automatic=True)
 
 
 def restore_backup_zip(data: bytes) -> dict:
@@ -825,9 +1283,9 @@ def restore_backup_zip(data: bytes) -> dict:
                 for attachment_id, pdf in pdf_data.items():
                     (stage_dir / f"{attachment_id}.pdf").write_bytes(pdf)
             if main_database is not None:
-                backup_before_change(current_database, force=True)
+                create_postgres_backup_or_503()
             elif ppwr_database is not None:
-                backup_before_change(current_database, force=True)
+                create_postgres_backup_or_503()
             if stage_dir is not None:
                 if DOCUMENTS_DIR.exists():
                     DOCUMENTS_DIR.replace(old_dir)
@@ -896,6 +1354,8 @@ def validate_item(value: object) -> dict:
 
 @app.get("/api/health")
 def health() -> dict:
+    if storage.postgres_enabled():
+        storage.check_health()
     return {"status": "ok"}
 
 
@@ -903,6 +1363,168 @@ def health() -> dict:
 def get_database() -> dict:
     with database_lock:
         return read_database()
+
+
+@app.get("/api/items/page")
+def get_material_page(
+    page: int = Query(default=0, ge=0),
+    page_size: int = Query(default=50, ge=1, le=100),
+    query: str = Query(default="", max_length=200),
+    filters: str = "{}",
+    sort: str = "item",
+    direction: str = "asc",
+) -> dict:
+    allowed_sorts = {"item", "description", "rohs", "reach", "date", "substances", "missing"}
+    if sort not in allowed_sorts or direction not in {"asc", "desc"}:
+        raise HTTPException(400, "Nieprawidłowe sortowanie bazy.")
+    validated_filters = validate_material_filters(filters)
+    with database_lock:
+        all_items = filtered_material_items(read_database(), query, validated_filters)
+    ordered = sorted(
+        all_items.items(),
+        key=lambda entry: (
+            material_sort_value(entry[0], entry[1], sort),
+            natural_sort_key(entry[0]),
+        ),
+        reverse=direction == "desc",
+    )
+    start = page * page_size
+    selected = ordered[start:start + page_size]
+    return {
+        "items": dict(selected),
+        "total": len(ordered),
+        "page": page,
+        "pageSize": page_size,
+        "pages": max(1, (len(ordered) + page_size - 1) // page_size),
+    }
+
+
+@app.get("/api/items/by-key")
+def get_material_by_key(key: str = Query(min_length=1, max_length=200)) -> dict:
+    normalized_key = item_key(key)
+    with database_lock:
+        item = get_items(read_database()).get(normalized_key)
+    if item is None:
+        raise HTTPException(404, "Nie znaleziono rekordu.")
+    return {"key": normalized_key, "item": item}
+
+
+@app.post("/api/items/lookup")
+async def lookup_material_records(request: Request) -> dict:
+    body = await read_json_body(request)
+    tokens = body.get("tokens") if isinstance(body, dict) else None
+    if (
+        not isinstance(tokens, list)
+        or len(tokens) > 5000
+        or any(not isinstance(token, str) or len(token) > 200 for token in tokens)
+    ):
+        raise HTTPException(400, "Nieprawidłowa lista ITEM do wyszukania.")
+    with database_lock:
+        items = lookup_materials(tokens, read_database())
+    return {"items": items}
+
+
+@app.get("/api/items/counts")
+def get_material_counts() -> dict:
+    counts = {}
+    with database_lock:
+        items = get_items(read_database())
+    for item in items.values():
+        if not isinstance(item, dict):
+            continue
+        for substance_id in item_object(item, "h"):
+            counts[substance_id] = counts.get(substance_id, 0) + 1
+        for missing in item_array(item, "u"):
+            if missing in {"pfas", "pip"}:
+                count_key = f"{missing}u"
+                counts[count_key] = counts.get(count_key, 0) + 1
+    return {"counts": counts}
+
+
+@app.get("/api/items/suggestions")
+def get_material_suggestions() -> dict:
+    suppliers = {}
+    rohs_values = {}
+    with database_lock:
+        items = get_items(read_database())
+    for item in items.values():
+        if not isinstance(item, dict):
+            continue
+        supplier = item.get("sup")
+        rohs = item.get("r")
+        if isinstance(supplier, str) and supplier:
+            suppliers[supplier] = suppliers.get(supplier, 0) + 1
+        if isinstance(rohs, str) and rohs:
+            rohs_values[rohs] = rohs_values.get(rohs, 0) + 1
+    return {
+        "sup": sorted(suppliers, key=lambda value: (-suppliers[value], fold_search(value)))[:400],
+        "r": sorted(rohs_values, key=lambda value: (-rohs_values[value], fold_search(value)))[:25],
+    }
+
+
+@app.get("/api/items/packing")
+def get_packing_material_page(
+    page: int = Query(default=0, ge=0),
+    page_size: int = Query(default=25, ge=1, le=100),
+    query: str = Query(default="", max_length=200),
+    ppwr_filter: str = "all",
+) -> dict:
+    if ppwr_filter not in {"all", "with", "without"}:
+        raise HTTPException(400, "Nieprawidłowy filtr PPWR.")
+    with database_lock:
+        database = read_database()
+        ppwr = read_ppwr_database()
+        documents, links = get_document_stores()
+        items = get_items(database)
+    ppwr_documents = {
+        key
+        for key, document_ids in links["items"].items()
+        if any(
+            documents["documents"].get(document_id, {}).get("type") == "PPWR"
+            for document_id in document_ids
+        )
+    }
+    search = fold_search(query.strip())
+    matches = []
+    for key, item in items.items():
+        if not isinstance(item, dict) or not item.get("packing"):
+            continue
+        has_document = key in ppwr_documents
+        if ppwr_filter == "with" and not has_document:
+            continue
+        if ppwr_filter == "without" and has_document:
+            continue
+        ppwr_item = ppwr["items"].get(key, {})
+        haystack = fold_search(" ".join([
+            key,
+            str(item.get("i") or ""),
+            str(item.get("d") or ""),
+            str(item.get("sup") or ""),
+            str(ppwr_item.get("m") or ""),
+            str(ppwr_item.get("t") or ""),
+        ]))
+        if search and search not in haystack:
+            continue
+        matches.append((key, item))
+    matches.sort(key=lambda entry: natural_sort_key(entry[0]))
+    start = page * page_size
+    selected = matches[start:start + page_size]
+    manufacturers = sorted({
+        item["sup"].strip()
+        for item in items.values()
+        if isinstance(item, dict)
+        and isinstance(item.get("sup"), str)
+        and item["sup"].strip()
+    }, key=fold_search)
+    return {
+        "materials": dict(selected),
+        "ppwr": {key: ppwr["items"][key] for key, _ in selected if key in ppwr["items"]},
+        "manufacturers": manufacturers,
+        "total": len(matches),
+        "page": page,
+        "pageSize": page_size,
+        "pages": max(1, (len(matches) + page_size - 1) // page_size),
+    }
 
 
 @app.get("/api/ppwr")
@@ -928,7 +1550,6 @@ async def update_ppwr_item(key: str, request: Request) -> dict:
             raise HTTPException(
                 409, "Rekord nie jest oznaczony jako materiał opakowaniowy."
             )
-        backup_before_change(material_database)
         database = read_ppwr_database()
         database["items"][key] = item
         write_json_file(PPWR_DATABASE_FILE, database)
@@ -985,36 +1606,30 @@ def download_ppwr_pdf(key: str, attachment_id: str) -> FileResponse:
 def get_documents() -> dict:
     with database_lock:
         documents, links = get_document_stores()
+        materials = get_items(read_database())
         linked_materials = {document_id: [] for document_id in documents["documents"]}
         for key, document_ids in links["items"].items():
             for document_id in document_ids:
                 linked_materials[document_id].append(key)
         return {
             "documents": [
-                {"i": document_id, **metadata, "materials": linked_materials[document_id]}
+                {
+                    "i": document_id,
+                    **metadata,
+                    "materials": linked_materials[document_id],
+                    "materialDetails": {
+                        key: {
+                            "i": materials[key].get("i", key),
+                            "d": materials[key].get("d", ""),
+                            "sup": materials[key].get("sup", ""),
+                        }
+                        for key in linked_materials[document_id]
+                        if key in materials
+                    },
+                }
                 for document_id, metadata in documents["documents"].items()
             ]
         }
-
-
-@app.get("/api/backup/documents")
-def download_document_database() -> JSONResponse:
-    with database_lock:
-        documents, _ = get_document_stores()
-        return JSONResponse(
-            content=documents,
-            headers={"Content-Disposition": 'attachment; filename="pdf_documents.json"'},
-        )
-
-
-@app.get("/api/backup/document-links")
-def download_document_links() -> JSONResponse:
-    with database_lock:
-        _, links = get_document_stores()
-        return JSONResponse(
-            content=links,
-            headers={"Content-Disposition": 'attachment; filename="material_document_links.json"'},
-        )
 
 
 @app.get("/api/materials/{key}/documents")
@@ -1085,7 +1700,6 @@ async def upload_document(
                     metadata["n"] = stored_name
                     metadata["type"] = document_type
                     metadata["dt"] = declaration_date
-                    backup_before_change(read_database())
                     write_json_file(DOCUMENTS_FILE, documents)
                 return {"document": {"i": document_id, **metadata}, "existing": True}
 
@@ -1106,7 +1720,6 @@ async def upload_document(
                 "type": document_type,
                 "dt": declaration_date,
             }
-            backup_before_change(read_database())
             write_json_file(DOCUMENTS_FILE, documents)
         except Exception:
             file_path.unlink(missing_ok=True)
@@ -1154,7 +1767,6 @@ async def update_document_metadata(document_id: str, request: Request) -> dict:
             or metadata["type"] != document_type
             or metadata["dt"] != declaration_date
         ):
-            backup_before_change(read_database())
             metadata["n"] = stored_name
             metadata["type"] = document_type
             metadata["dt"] = declaration_date
@@ -1176,7 +1788,6 @@ async def update_document_type(document_id: str, request: Request) -> dict:
         if metadata is None or not (DOCUMENTS_DIR / f"{document_id}.pdf").is_file():
             raise HTTPException(404, "Nie znaleziono dokumentu PDF.")
         if metadata["type"] != document_type:
-            backup_before_change(read_database())
             metadata["type"] = document_type
             write_json_file(DOCUMENTS_FILE, documents)
         return {"document": {"i": document_id, **metadata}}
@@ -1197,7 +1808,6 @@ def link_document_to_material(key: str, document_id: str) -> dict:
             raise HTTPException(404, "Nie znaleziono dokumentu PDF.")
         material_links = links["items"].setdefault(key, [])
         if document_id not in material_links:
-            backup_before_change(read_database())
             material_links.append(document_id)
             write_json_file(DOCUMENT_LINKS_FILE, links)
         return {"key": key, "document": {"i": document_id, **documents["documents"][document_id]}}
@@ -1218,7 +1828,6 @@ def unlink_document_from_material(key: str, document_id: str) -> dict:
         material_links = links["items"].get(key)
         if not material_links or document_id not in material_links:
             raise HTTPException(404, "Dokument nie jest powiązany z tym materiałem.")
-        backup_before_change(read_database())
         material_links.remove(document_id)
         if not material_links:
             del links["items"][key]
@@ -1255,7 +1864,6 @@ async def rename_document(document_id: str, request: Request) -> dict:
         _, timestamp = split_document_name(metadata["n"])
         stored_name = document_name_with_timestamp(name, timestamp) if timestamp else name
         if metadata["n"] != stored_name:
-            backup_before_change(read_database())
             metadata["n"] = stored_name
             write_json_file(DOCUMENTS_FILE, documents)
         return {"document": {"i": document_id, **metadata}}
@@ -1269,7 +1877,7 @@ def delete_document(document_id: str) -> dict:
         documents, links = get_document_stores()
         if document_id not in documents["documents"]:
             raise HTTPException(404, "Nie znaleziono dokumentu PDF.")
-        backup_before_change(read_database())
+
         del documents["documents"][document_id]
         links["items"] = {
             key: linked
@@ -1306,50 +1914,6 @@ def get_database_meta() -> dict:
         return get_meta(read_database())
 
 
-@app.get("/api/backup")
-def download_current_backup() -> JSONResponse:
-    with database_lock:
-        database = read_database()
-        return JSONResponse(
-            content={**database, "ppwr": read_ppwr_database()},
-            headers={"Content-Disposition": 'attachment; filename="material_db.json"'},
-        )
-
-
-@app.get("/api/backup/materials")
-def download_materials_json() -> JSONResponse:
-    with database_lock:
-        return JSONResponse(
-            content=read_database(),
-            headers={
-                "Content-Disposition": 'attachment; filename="rcd_material_db.json"'
-            },
-        )
-
-
-@app.get("/api/backup/ppwr")
-def download_ppwr_json() -> JSONResponse:
-    with database_lock:
-        return JSONResponse(
-            content=read_ppwr_database(),
-            headers={
-                "Content-Disposition": 'attachment; filename="ppwr_material_db.json"'
-            },
-        )
-
-
-@app.get("/api/backup.zip")
-def download_backup_zip() -> FileResponse:
-    with database_lock:
-        zip_path = backup_zip_path()
-    return FileResponse(
-        zip_path,
-        media_type="application/zip",
-        filename="compliance_backup.zip",
-        background=BackgroundTask(zip_path.unlink, missing_ok=True),
-    )
-
-
 @app.post("/api/db/import-zip")
 async def import_backup_zip(request: Request) -> dict:
     if request.headers.get("content-type", "").split(";", 1)[0].lower() not in {
@@ -1368,6 +1932,37 @@ async def import_backup_zip(request: Request) -> dict:
     return {"meta": meta}
 
 
+@app.post("/api/db/import-preview")
+async def preview_database_import(request: Request) -> dict:
+    body = await read_json_body(request)
+    if not isinstance(body, dict) or not isinstance(body.get("items"), dict):
+        raise HTTPException(400, "Nieprawidłowy format bazy: wymagany jest obiekt items.")
+    if any(not isinstance(item, dict) for item in body["items"].values()):
+        raise HTTPException(400, "Rekord w bazie ma nieprawidłowy format.")
+    imported = {"items": body["items"]}
+    try:
+        normalize_material_keys(imported)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    with database_lock:
+        current = get_items(read_database())
+    manual = {
+        key: item
+        for key, item in current.items()
+        if isinstance(item, dict) and item.get("mod")
+    }
+    if body.get("keepManual") is True:
+        imported["items"].update(manual)
+    current_keys = set(current)
+    imported_keys = set(imported["items"])
+    return {
+        "manualCount": len(manual),
+        "added": len(imported_keys - current_keys),
+        "removed": len(current_keys - imported_keys),
+        "count": len(imported_keys),
+    }
+
+
 @app.post("/api/ppwr")
 async def replace_ppwr_database(request: Request) -> dict:
     body = await read_json_body(request)
@@ -1381,7 +1976,7 @@ async def replace_ppwr_database(request: Request) -> dict:
                 raise HTTPException(
                     400, f"ITEM {key} w PPWR nie jest materiałem opakowaniowym."
                 )
-        backup_before_change(read_database(), force=True)
+        create_postgres_backup_or_503()
         write_json_file(PPWR_DATABASE_FILE, database)
         return {"items": len(database["items"])}
 
@@ -1393,6 +1988,8 @@ def get_backups() -> list[dict]:
             {
                 "name": path.name,
                 "size": path.stat().st_size,
+                "type": "postgresql",
+                "format": "custom",
                 "mtime": datetime.fromtimestamp(
                     path.stat().st_mtime, timezone.utc
                 ).isoformat(),
@@ -1401,32 +1998,28 @@ def get_backups() -> list[dict]:
         ]
 
 
-@app.post("/api/backups", status_code=201)
-def post_backup() -> dict:
+@app.post("/api/backups/postgresql", status_code=201)
+def post_postgres_backup() -> dict:
     with database_lock:
-        return {"name": create_backup(read_database())}
+        return {"name": create_postgres_backup_or_503()}
 
 
 @app.get("/api/backups/{name}")
 def download_backup(name: str) -> FileResponse:
-    if Path(name).name != name or not BACKUP_PATTERN.fullmatch(name):
+    if Path(name).name != name or not POSTGRES_BACKUP_PATTERN.fullmatch(name):
         raise HTTPException(400, "Nieprawidłowa nazwa kopii.")
     path = BACKUP_DIR / name
-    if not path.is_file() and LEGACY_BACKUP_PATTERN.fullmatch(name):
-        path = BACKUP_DIR / f"material_db_{name[4:]}"
     if not path.is_file():
         raise HTTPException(404, "Nie znaleziono kopii zapasowej.")
-    return FileResponse(path, media_type="application/json", filename=path.name)
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
 
 @app.post("/api/backups/{name}/delete")
 def delete_backup(name: str) -> dict:
-    if Path(name).name != name or not BACKUP_PATTERN.fullmatch(name):
+    if Path(name).name != name or not POSTGRES_BACKUP_PATTERN.fullmatch(name):
         raise HTTPException(400, "Nieprawidłowa nazwa kopii.")
     with database_lock:
         path = BACKUP_DIR / name
-        if not path.is_file() and LEGACY_BACKUP_PATTERN.fullmatch(name):
-            path = BACKUP_DIR / f"material_db_{name[4:]}"
         if not path.is_file():
             raise HTTPException(404, "Nie znaleziono kopii zapasowej.")
         path.unlink()
@@ -1443,8 +2036,11 @@ async def create_item(request: Request) -> dict:
         items = get_items(database)
         if key in items:
             raise HTTPException(409, f"Rekord ITEM „{items[key].get('i', key)}” już istnieje.")
-        backup_before_change(database)
-        saved_item = {**item, "mod": utc_now()}
+        saved_item = {
+            **item,
+            "mod": utc_now(),
+            "updatedBy": request.state.username,
+        }
         items[key] = saved_item
         database["updated"] = utc_now()
         database["n"] = len(items)
@@ -1476,8 +2072,11 @@ async def update_item(key: str, request: Request) -> dict:
             raise HTTPException(
                 409, f"Rekord ITEM „{items[new_key].get('i', new_key)}” już istnieje."
             )
-        backup_before_change(database)
-        saved_item = {**item, "mod": utc_now()}
+        saved_item = {
+            **item,
+            "mod": utc_now(),
+            "updatedBy": request.state.username,
+        }
         del items[key]
         items[new_key] = saved_item
         database["updated"] = utc_now()
@@ -1521,7 +2120,6 @@ def delete_item(key: str) -> dict:
         items = get_items(database)
         if key not in items:
             raise HTTPException(404, "Nie znaleziono rekordu.")
-        backup_before_change(database)
         del items[key]
         database["updated"] = utc_now()
         database["n"] = len(items)
@@ -1567,6 +2165,12 @@ async def replace_database(request: Request) -> dict:
             }
             for key, item in imported_database["items"].items()
         }
+        if body.get("keepManual") is True:
+            items.update({
+                key: item
+                for key, item in get_items(previous_database).items()
+                if isinstance(item, dict) and item.get("mod")
+            })
         ppwr_database = ppwr_database or previous_ppwr
         if "ppwr" in body:
             for key in ppwr_database["items"]:
@@ -1587,12 +2191,16 @@ async def replace_database(request: Request) -> dict:
             if key in items and (linked := list(document_ids))
         }
         database = {
-            **{key: value for key, value in body.items() if key not in {"reach", "ppwr"}},
+            **{
+                key: value
+                for key, value in body.items()
+                if key not in {"reach", "ppwr", "keepManual"}
+            },
             "items": items,
             "n": len(items),
             "updated": utc_now(),
         }
-        backup_name = backup_before_change(previous_database, force=True)
+        backup_name = create_postgres_backup_or_503()
         write_database(database)
         write_json_file(PPWR_DATABASE_FILE, ppwr_database)
         write_json_file(DOCUMENT_LINKS_FILE, document_links)
@@ -1604,7 +2212,7 @@ def clear_database() -> dict:
     with database_lock:
         previous_database = read_database()
         read_ppwr_database()
-        backup_name = backup_before_change(previous_database, force=True)
+        backup_name = create_postgres_backup_or_503()
         database = {
             **previous_database,
             "items": {},

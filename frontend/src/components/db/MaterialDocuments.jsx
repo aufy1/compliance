@@ -7,7 +7,7 @@ import { fold } from '../../lib/utils.js';
 import { btnGhost, input } from '../ui/styles.js';
 import DocumentFormModal from './DocumentFormModal.jsx';
 
-export default function MaterialDocuments({ materialKey, material, notify }) {
+export default function MaterialDocuments({ materialKey, notify }) {
   const { t, language } = useI18n();
   const locale = language === 'en' ? 'en-US' : 'pl-PL';
   const fileRef = useRef(null);
@@ -58,12 +58,12 @@ export default function MaterialDocuments({ materialKey, material, notify }) {
       && [
         documentName(document.n),
         ...document.materials.flatMap(key => {
-          const item = material?.items?.[key];
+          const item = document.materialDetails?.[key];
           return [key, item?.i, item?.d, item?.sup].filter(Boolean);
         }),
       ].some(value => fold(value).includes(needle)))
       .slice(0, 10);
-  }, [library, linkedIds, material, query]);
+  }, [library, linkedIds, query]);
 
   if (!materialKey) {
     return <p className="text-xs text-zinc-500">{t('Save the material before linking documents.')}</p>;

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Pencil, Plus, Trash2, Sparkles, Save, Loader2, AlertTriangle, ExternalLink, CalendarDays } from 'lucide-react';
 import RCDDB from '../../lib/rcddb.js';
 import { ASSIGNABLE_GROUPS, BY_ID } from '../../lib/substances.js';
@@ -39,7 +39,7 @@ const SectionTitle = ({ children, right }) => (
   </div>
 );
 
-export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted, onOpenExisting, notify }) {
+export default function RecordEditor({ editing, onClose, onSaved, onDeleted, onOpenExisting, notify }) {
   const { t: tr, language } = useI18n();
   const isNew = !editing.key;
   const [f, setF] = useState(() => toForm(editing.item));
@@ -47,6 +47,8 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
   const [err, setErr] = useState('');
   const [substanceSearch, setSubstanceSearch] = useState({});
   const [substanceSearchOpen, setSubstanceSearchOpen] = useState({});
+  const [lists, setLists] = useState({ sup: [], r: [] });
+  const [clash, setClash] = useState(null);
   const set = k => v => setF(p => ({ ...p, [k]: v }));
   const setRow = (u, patch) => setF(p => ({ ...p, h: p.h.map(x => (x.uid === u ? { ...x, ...patch } : x)) }));
   const addSubstance = () => {
@@ -69,19 +71,28 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
   };
 
   /* podpowiedzi do pól */
-  const lists = useMemo(() => {
-    const sup = new Map(), r = new Map();
-    const inc = (m, v) => v && m.set(v, (m.get(v) || 0) + 1);
-    Object.values(db.items).forEach(it => {
-      inc(sup, it.sup);
-      inc(r, it.r);
-    });
-    const top = (m, n) => [...m.entries()].sort((x, y) => y[1] - x[1]).slice(0, n).map(x => x[0]);
-    return { sup: top(sup, 400), r: top(r, 25) };
-  }, [db]);
+  useEffect(() => {
+    let active = true;
+    api.itemSuggestions()
+      .then(result => { if (active) setLists(result); })
+      .catch(error => { if (active) setErr(error.message); });
+    return () => { active = false; };
+  }, []);
 
   const newKey = keyN(f.i);
-  const clash = newKey && newKey !== editing.key && db.items[newKey];
+  const checkClash = async () => {
+    if (!newKey || newKey === editing.key) {
+      setClash(null);
+      return;
+    }
+    try {
+      const result = await api.itemByKey(newKey);
+      setClash(result.item);
+    } catch (error) {
+      if (error.status === 404) setClash(null);
+      else setErr(error.message);
+    }
+  };
   const dupIds = f.h.map(x => x.id).filter((id, i, arr) => id && arr.indexOf(id) !== i);
 
   const suggest = () => {
@@ -98,7 +109,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
   const save = async () => {
     setErr('');
     if (!f.i.trim()) return setErr(tr('Pole ITEM jest wymagane.'));
-    if (clash) return setErr(tr('Rekord ITEM „{item}” już istnieje.', { item: db.items[newKey].i }));
+    if (clash) return setErr(tr('Rekord ITEM „{item}” już istnieje.', { item: clash.i }));
     if (dupIds.length) return setErr(tr('Substancja dodana więcej niż raz: {items}', { items: [...new Set(dupIds)].map(id => language === 'en' ? BY_ID[id]?.en || BY_ID[id]?.n || id : BY_ID[id]?.n || id).join(', ') }));
     if (f.h.some(x => !x.id)) return setErr(tr('Wybierz substancję w każdym wierszu (albo usuń pusty wiersz).'));
     setBusy(true);
@@ -124,6 +135,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
       {!isNew && <button className={btnDanger} onClick={remove} disabled={busy}><Trash2 size={14} /> {tr('Usuń')}</button>}
       <div className="text-[10px] text-zinc-600 ml-2 hidden sm:block">
         {editing.item.mod && <>{tr('zmieniony ręcznie')} {new Date(editing.item.mod).toLocaleString(language === 'en' ? 'en-US' : 'pl-PL')}</>}
+        {editing.item.updatedBy && <> · {tr('Ostatnio edytował: {username}', { username: editing.item.updatedBy })}</>}
         {editing.item.dup > 1 && <> · w CSV ×{editing.item.dup}</>}
       </div>
       <div className="ml-auto flex gap-2">
@@ -144,7 +156,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
         <div className="grid md:grid-cols-6 gap-3">
           <div className="md:col-span-2">
             <Label>ITEM *</Label>
-            <input autoFocus={isNew} className={cx(input, 'font-mono', clash && 'border-red-500')} value={f.i} onChange={e => set('i')(e.target.value)} placeholder="np. 0015903" />
+            <input autoFocus={isNew} className={cx(input, 'font-mono', clash && 'border-red-500')} value={f.i} onChange={e => { setClash(null); set('i')(e.target.value); }} onBlur={checkClash} placeholder="np. 0015903" />
             {clash && (
               <button onClick={() => onOpenExisting(newKey)} className="mt-1 text-[11px] text-red-300 hover:underline flex items-center gap-1">
                 {tr('taki ITEM już istnieje – otwórz')} <ExternalLink size={11} />
@@ -284,7 +296,7 @@ export default function RecordEditor({ editing, db, onClose, onSaved, onDeleted,
         </div>
 
         <SectionTitle>{tr('Documents')}</SectionTitle>
-        <MaterialDocuments materialKey={editing.key} material={db} notify={notify} />
+        <MaterialDocuments materialKey={editing.key} notify={notify} />
 
         <datalist id="dl-sup">{lists.sup.map(v => <option key={v} value={v} />)}</datalist>
         <datalist id="dl-r">{lists.r.map(v => <option key={v} value={v} />)}</datalist>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Archive, Download, FileJson, FileSpreadsheet, Loader2, RefreshCw, Server, Trash2, Upload } from 'lucide-react';
-import { api, BACKUP_ZIP_URL, DOCUMENTS_BACKUP_URL, DOCUMENT_LINKS_BACKUP_URL, MATERIALS_BACKUP_URL, PPWR_BACKUP_URL, backupFileUrl } from '../api.js';
+import { Archive, Database, Download, FileSpreadsheet, Loader2, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { api, backupFileUrl } from '../api.js';
 import { fmtSize } from '../lib/utils.js';
 import { btnGhost, btnPrimary, panel } from '../components/ui/styles.js';
 import { useI18n } from '../lib/i18n-context.js';
@@ -81,11 +81,11 @@ export default function BackupView({ notify, onImportFile }) {
     return () => { active = false; };
   }, [notify]);
 
-  const makeServerBackup = async () => {
+  const makePostgresBackup = async () => {
     setBusy(true);
     try {
-      const result = await api.createBackup();
-      notify(t('Utworzono kopię na serwerze: {name}', { name: result.name }));
+      const result = await api.createPostgresBackup();
+      notify(t('Utworzono kopię PostgreSQL: {name}', { name: result.name }));
       await refreshBackups();
     } catch (error) {
       notify(error.message, 'error');
@@ -113,7 +113,7 @@ export default function BackupView({ notify, onImportFile }) {
       <header className="mb-6 flex flex-wrap items-center gap-3">
         <div className="mr-auto">
           <h1 className="text-xl font-semibold text-white">{t('Kopie zapasowe')}</h1>
-          <p className="mt-1 text-sm text-zinc-400">{t('Pobierz bazę lub utwórz kopię przechowywaną na serwerze.')}</p>
+          <p className="mt-1 text-sm text-zinc-400">{t('Kopie zawierają dane PostgreSQL. Pliki PDF pozostają w katalogu rcd-data/documents.')}</p>
         </div>
         <button type="button" onClick={refreshBackups} className={btnGhost}>
           <RefreshCw size={14} /> {t('Odśwież')}
@@ -121,22 +121,7 @@ export default function BackupView({ notify, onImportFile }) {
       </header>
 
       <section className={`${panel} mb-5 flex flex-wrap items-center gap-3 p-4`}>
-        <span className="mr-auto text-sm font-medium text-zinc-200">{t('Pobierz aktualną bazę:')}</span>
-        <a href={BACKUP_ZIP_URL} download className={btnPrimary}>
-          <Archive size={15} /> ZIP
-        </a>
-        <a href={MATERIALS_BACKUP_URL} download className={btnGhost}>
-          <FileJson size={15} /> {t('Materials JSON')}
-        </a>
-        <a href={PPWR_BACKUP_URL} download className={btnGhost}>
-          <FileJson size={15} /> PPWR JSON
-        </a>
-        <a href={DOCUMENTS_BACKUP_URL} download className={btnGhost}>
-          <FileJson size={15} /> {t('Documents JSON')}
-        </a>
-        <a href={DOCUMENT_LINKS_BACKUP_URL} download className={btnGhost}>
-          <FileJson size={15} /> {t('Document links JSON')}
-        </a>
+        <span className="mr-auto text-sm font-medium text-zinc-200">{t('Eksport tabeli materiałów:')}</span>
         <button type="button" onClick={downloadDatabaseCsv} className={btnGhost}>
           <FileSpreadsheet size={15} /> CSV
         </button>
@@ -157,9 +142,9 @@ export default function BackupView({ notify, onImportFile }) {
             {t('Zapisane kopie')}
             {backups && <span className="text-xs font-normal text-zinc-500">({backups.length})</span>}
           </div>
-          <button type="button" onClick={makeServerBackup} disabled={busy} className={btnPrimary}>
-            {busy ? <Loader2 size={15} className="animate-spin" /> : <Server size={15} />}
-            {t('Utwórz kopię')}
+          <button type="button" onClick={makePostgresBackup} disabled={busy} className={btnPrimary}>
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <Database size={15} />}
+            {t('Utwórz kopię PostgreSQL')}
           </button>
         </div>
         {backups === null && (
@@ -175,11 +160,14 @@ export default function BackupView({ notify, onImportFile }) {
             {backups.map(backup => (
               <li key={backup.name} className="flex items-center gap-3 px-4 py-3">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-800 text-zinc-300">
-                  <Archive size={16} />
+                  <Database size={16} />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium text-zinc-200" title={backup.name}>{backup.name}</div>
-                  <div className="mt-0.5 text-xs text-zinc-500">{new Date(backup.mtime).toLocaleString(language === 'en' ? 'en-US' : 'pl-PL')} · {fmtSize(backup.size)}</div>
+                  <div className="mt-0.5 text-xs text-zinc-500">
+                    {t('PostgreSQL · format custom')}
+                    {' · '}{new Date(backup.mtime).toLocaleString(language === 'en' ? 'en-US' : 'pl-PL')} · {fmtSize(backup.size)}
+                  </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <a href={backupFileUrl(backup.name)} download aria-label={`${t('Pobierz kopię')} ${backup.name}`} className={btnGhost}>

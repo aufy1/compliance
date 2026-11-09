@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, Boxes, ChevronDown, ChevronRight, Loader2, Package, PackageOpen, RefreshCw, Save, Search, X } from 'lucide-react';
+import { AlertTriangle, Boxes, ChevronDown, ChevronLeft, ChevronRight, Loader2, Package, PackageOpen, RefreshCw, Save, Search, X } from 'lucide-react';
 import { api } from '../api.js';
 import { useI18n } from '../lib/i18n-context.js';
 import { DOCUMENTS_UPDATED_EVENT, documentAddedAt, documentName } from '../lib/documents.js';
@@ -10,6 +10,7 @@ const STAGES = [
   { key: 's', label: 'Secondary', Icon: PackageOpen },
   { key: 't', label: 'Tertiary / grouped transport', Icon: Boxes },
 ];
+const PAGE_SIZE = 25;
 const toForm = (item, material) => ({
   t: item?.t || '',
   w: item?.w == null ? '' : String(item.w),
@@ -18,10 +19,11 @@ const toForm = (item, material) => ({
   h: item?.h || 'u',
 });
 
-export default function PackingView({ db, onEdit, onNew, notify }) {
+export default function PackingView({ db, reloadSequence, onEdit, onNew, notify }) {
   const { language, t } = useI18n();
   const [data, setData] = useState(null);
   const [documents, setDocuments] = useState(null);
+  const [materialsPage, setMaterialsPage] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [drafts, setDrafts] = useState({});
   const [errors, setErrors] = useState({});
@@ -30,22 +32,27 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
   const [query, setQuery] = useState('');
   const [ppwrFilter, setPpwrFilter] = useState('all');
   const [expanded, setExpanded] = useState(null);
+  const [page, setPage] = useState(0);
   const locale = language === 'en' ? 'en-US' : 'pl-PL';
 
   useEffect(() => {
     let active = true;
     setLoadError('');
-    Promise.all([api.ppwr(), api.documents()])
-      .then(([ppwrResult, documentResult]) => {
+    Promise.all([
+      api.packingPage({ page, pageSize: PAGE_SIZE, query, ppwrFilter }),
+      api.documents(),
+    ])
+      .then(([pageResult, documentResult]) => {
         if (!active) return;
-        setData(ppwrResult);
+        setData({ items: pageResult.ppwr });
+        setMaterialsPage(pageResult);
         setDocuments(documentResult.documents);
       })
       .catch(error => {
         if (active) setLoadError(error.message);
       });
     return () => { active = false; };
-  }, [reload]);
+  }, [db?.updated, reloadSequence, page, query, ppwrFilter, reload]);
 
   useEffect(() => {
     const refreshDocuments = () => setReload(value => value + 1);
@@ -53,35 +60,19 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
     return () => window.removeEventListener(DOCUMENTS_UPDATED_EVENT, refreshDocuments);
   }, []);
 
-  const ppwrMaterials = useMemo(() => new Set(
-    (documents || []).filter(document => document.type === 'PPWR')
-      .flatMap(document => document.materials),
-  ), [documents]);
-  const items = useMemo(() => Object.entries(db.items)
-    .filter(([, item]) => item.packing)
-    .sort(([, left], [, right]) => left.i.localeCompare(right.i, undefined, { numeric: true }))
-    .map(([key, item]) => ({ key, item }))
-    .filter(({ key, item }) => {
-        if (ppwrFilter === 'with' && !ppwrMaterials.has(key)) return false;
-        if (ppwrFilter === 'without' && ppwrMaterials.has(key)) return false;
-        const haystack = [
-          key, item.i, item.d, item.sup, data?.items?.[key]?.m, data?.items?.[key]?.t,
-        ].filter(Boolean).join(' ').toLocaleLowerCase();
-      return haystack.includes(query.trim().toLocaleLowerCase());
-    }), [db, data, ppwrFilter, ppwrMaterials, query]);
-  const manufacturers = useMemo(() => [...new Set(Object.values(db.items)
-    .map(item => typeof item.sup === 'string' ? item.sup.trim() : '')
-    .filter(Boolean))].sort((left, right) => left.localeCompare(right)), [db]);
+  const items = useMemo(() => Object.entries(materialsPage?.materials || {})
+    .map(([key, item]) => ({ key, item })), [materialsPage]);
+  const manufacturers = materialsPage?.manufacturers || [];
   const setField = (key, field, value) => {
     setDrafts(current => ({
       ...current,
-      [key]: { ...(current[key] || toForm(data.items[key], db.items[key])), [field]: value },
+      [key]: { ...(current[key] || toForm(data.items[key], materialsPage.materials[key])), [field]: value },
     }));
     setErrors(current => ({ ...current, [key]: '' }));
   };
 
   const save = async key => {
-    const form = drafts[key] || toForm(data.items[key], db.items[key]);
+    const form = drafts[key] || toForm(data.items[key], materialsPage.materials[key]);
     const parseNumber = (value, label) => {
       if (value === '') return null;
       const number = Number(value);
@@ -113,7 +104,7 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
         delete next[key];
         return next;
       });
-      notify(t('Saved PPWR data for {item}', { item: db.items[key].i }));
+      notify(t('Saved PPWR data for {item}', { item: materialsPage.materials[key].i }));
     } catch (error) {
       setErrors(current => ({ ...current, [key]: error.message }));
     } finally {
@@ -136,7 +127,7 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
     );
   }
 
-  if (!data || !documents) {
+  if (!data || !documents || !materialsPage) {
     return <div className="flex min-h-64 items-center justify-center gap-2 p-6 text-sm text-zinc-500"><Loader2 size={17} className="animate-spin" />{t('Loading PPWR data…')}</div>;
   }
 
@@ -160,18 +151,26 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
           <input
             value={query}
-            onChange={event => setQuery(event.target.value)}
+            onChange={event => { setQuery(event.target.value); setPage(0); }}
             className={`${input} pl-9 ${query ? 'pr-9' : ''}`}
             placeholder={t('Search packing materials by ITEM, description or MFG…')}
             aria-label={t('Search packing materials')}
           />
-          {query && <button type="button" onClick={() => setQuery('')} aria-label={t('Clear search')} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"><X size={15} /></button>}
+          {query && <button type="button" onClick={() => { setQuery(''); setPage(0); }} aria-label={t('Clear search')} className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"><X size={15} /></button>}
         </div>
-        <select className={`${input} sm:w-64`} value={ppwrFilter} onChange={event => setPpwrFilter(event.target.value)} aria-label={t('Filter PPWR declarations')}>
+        <select className={`${input} sm:w-64`} value={ppwrFilter} onChange={event => { setPpwrFilter(event.target.value); setPage(0); }} aria-label={t('Filter PPWR declarations')}>
           <option value="all">{t('All PPWR declaration statuses')}</option>
           <option value="with">{t('With PPWR declaration')}</option>
           <option value="without">{t('Without PPWR declaration')}</option>
         </select>
+      </div>
+      <div className="flex items-center justify-between text-xs text-zinc-500">
+        <span>{materialsPage.total.toLocaleString(language === 'en' ? 'en-US' : 'pl-PL')} {t('pasujących rekordów')}</span>
+        <div className="flex items-center gap-1">
+          <button type="button" className={`${btnGhost} px-2 py-1.5`} disabled={page === 0} onClick={() => setPage(current => current - 1)}><ChevronLeft size={14} /></button>
+          <span className="px-2">{page + 1} / {materialsPage.pages}</span>
+          <button type="button" className={`${btnGhost} px-2 py-1.5`} disabled={page >= materialsPage.pages - 1} onClick={() => setPage(current => current + 1)}><ChevronRight size={14} /></button>
+        </div>
       </div>
 
       <div className="grid gap-3">
@@ -195,7 +194,7 @@ export default function PackingView({ db, onEdit, onNew, notify }) {
                   })}
                   {item.sup && <span className="ml-auto hidden max-w-48 truncate text-xs text-zinc-500 sm:block">{item.sup}</span>}
                 </button>
-                <button type="button" className={`${btnGhost} shrink-0 py-1.5`} onClick={() => onEdit(key)}>{t('Edit material')}</button>
+                <button type="button" className={`${btnGhost} shrink-0 py-1.5`} onClick={() => onEdit(key, item)}>{t('Edit material')}</button>
               </div>
 
               {isExpanded && (

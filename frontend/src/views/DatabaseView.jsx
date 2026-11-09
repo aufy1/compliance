@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ClipboardList, Database, Filter,
@@ -11,10 +11,9 @@ import BatchStatusReport from '../components/db/BatchStatusReport.jsx';
 import { panel, input, btnGhost, btnPrimary } from '../components/ui/styles.js';
 import { useI18n } from '../lib/i18n-context.js';
 import { reachLabel } from '../lib/rcd.js';
+import { api } from '../api.js';
 
 const PER = 50;
-const coll = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
-const isoDt = s => { const m = /^(\d\d)\.(\d\d)\.(\d{4})/.exec(s || ''); return m ? `${m[3]}-${m[2]}-${m[1]}` : (s || ''); };
 const substanceName = (id, language) => language === 'en' ? BY_ID[id]?.en || BY_ID[id]?.n : BY_ID[id]?.n;
 const FILTER_COLUMNS = {
   item: {
@@ -53,7 +52,7 @@ const FILTER_COLUMNS = {
   },
 };
 
-export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
+export default function DatabaseView({ db, reloadSequence, onEdit, onDelete, onNew, notify }) {
   const { t, language } = useI18n();
   const [q, setQ] = useState('');
   const [filters, setFilters] = useState(() => Object.fromEntries(
@@ -64,7 +63,37 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
   const [openFilter, setOpenFilter] = useState(null);
   const filterPopupRef = useRef(null);
   const [page, setPage] = useState(0);
+  const [pageData, setPageData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const dq = useDeferredValue(q);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setLoadError('');
+    const requestFilters = Object.fromEntries(Object.entries(filters).map(([field, criteria]) => {
+      if (criteria.mode !== 'text' || !['substances', 'missing'].includes(field)) {
+        return [field, criteria];
+      }
+      const terms = fold(criteria.query.trim()).split(/\s+/).filter(Boolean);
+      const labels = field === 'substances'
+        ? Object.fromEntries(Object.entries(BY_ID)
+          .filter(([id, substance]) => terms.some(term => fold(`${id} ${substance.n || ''}`).includes(term)))
+          .map(([id, substance]) => [id, substance.n || id]))
+        : Object.fromEntries(Object.entries(UL)
+          .filter(([id, label]) => terms.some(term => fold(`${id} ${label}`).includes(term))));
+      return [field, { ...criteria, labels }];
+    }));
+    api.itemsPage({ page, pageSize: PER, query: dq, filters: requestFilters, sort })
+      .then(result => {
+        if (!active) return;
+        setPageData(result);
+        if (page >= result.pages) setPage(Math.max(0, result.pages - 1));
+      })
+      .catch(error => { if (active) setLoadError(error.message); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [db?.updated, reloadSequence, page, dq, filters, sort]);
   useEffect(() => {
     if (!openFilter) return undefined;
     const onPointerDown = event => {
@@ -92,53 +121,10 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
     setPage(0);
   };
 
-  const rows = useMemo(() => Object.entries(db.items).map(([k, it]) => ({
-    k, it, hay: fold([k, it.i, it.d, it.sup, it.r, FILTER_COLUMNS.reach.value({ it }), (it.al || []).join(' ')].join(' ')),
-  })), [db]);
-
-  const filtered = useMemo(() => {
-    const words = fold(dq.trim()).split(/\s+/).filter(Boolean);
-    const r = rows.filter(row => {
-      if (!words.every(word => row.hay.includes(word))) return false;
-      return Object.entries(filters).every(([key, filter]) => {
-        const value = FILTER_COLUMNS[key].value(row).trim();
-        if (filter.mode === 'empty') return !value;
-        if (filter.mode === 'nonempty') return Boolean(value);
-        if (filter.mode === 'text') {
-          if (key === 'supplier') {
-            const query = fold(filter.query.trim());
-            return !query || (filter.match === 'exact' ? fold(value) === query : fold(value).includes(query));
-          }
-          const terms = fold(filter.query.trim()).split(/\s+/).filter(Boolean);
-          const candidate = fold(value);
-          return !terms.length || terms.every(term => candidate.includes(term));
-        }
-        return true;
-      });
-    });
-    const value = row => {
-      if (sort.key === 'item') return row.k;
-      if (sort.key === 'description') return row.it.d || '';
-      if (sort.key === 'rohs') return row.it.r || '';
-      if (sort.key === 'reach') return FILTER_COLUMNS.reach.value(row);
-      if (sort.key === 'date') return isoDt(row.it.dt || '');
-      if (sort.key === 'substances') return Object.keys(row.it.h || {}).length;
-      if (sort.key === 'missing') return (row.it.u || []).length;
-      return '';
-    };
-    r.sort((a, b) => {
-      const left = value(a), right = value(b);
-      const order = typeof left === 'number' && typeof right === 'number'
-        ? left - right
-        : coll.compare(left, right);
-      return (sort.direction === 'asc' ? order : -order) || coll.compare(a.k, b.k);
-    });
-    return r;
-  }, [rows, dq, filters, sort]);
-
-  const pages = Math.max(1, Math.ceil(filtered.length / PER));
+  const total = pageData?.total ?? 0;
+  const pages = pageData?.pages ?? 1;
   const p = Math.min(page, pages - 1);
-  const view = filtered.slice(p * PER, p * PER + PER);
+  const view = Object.entries(pageData?.items || {}).map(([k, it]) => ({ k, it }));
   const anyFilter = Boolean(q) || Object.values(filters).some(filter => filter.mode !== 'all');
   const updateFilter = (key, patch) => {
     setFilters(current => ({ ...current, [key]: { ...current[key], ...patch } }));
@@ -344,7 +330,9 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
           </button>
         </div>
         <p className="mt-2 text-xs text-zinc-500">
-          {t('Baza materiałów')} · {filtered.length.toLocaleString(language === 'en' ? 'en-US' : 'pl-PL')} {t('pasujących rekordów')}
+          {t('Baza materiałów')} · {total.toLocaleString(language === 'en' ? 'en-US' : 'pl-PL')} {t('pasujących rekordów')}
+          {loading && <span className="ml-2 text-indigo-300">{t('Wczytywanie…')}</span>}
+          {loadError && <span role="alert" className="ml-2 text-red-300">{loadError}</span>}
         </p>
       </header>
       {openFilter && createPortal(
@@ -377,9 +365,9 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
             </thead>
             <tbody>
               {view.map(({ k, it }) => (
-                <tr key={k} onClick={() => onEdit(k)} className="border-t border-zinc-800/70 align-top hover:bg-zinc-800/40 cursor-pointer group">
+                <tr key={k} onClick={() => onEdit(k, it)} className="border-t border-zinc-800/70 align-top hover:bg-zinc-800/40 cursor-pointer group">
                   <td className="px-3 py-2 font-mono whitespace-nowrap text-zinc-100">
-                    <div className="flex items-center gap-1.5">{it.i}{it.mod && <span title={`${t('zmieniony ręcznie')} ${new Date(it.mod).toLocaleString(language === 'en' ? 'en-US' : 'pl-PL')}`}><PenLine size={12} className="text-indigo-400" /></span>}</div>
+                    <div className="flex items-center gap-1.5">{it.i}{it.mod && <span title={`${t('zmieniony ręcznie')} ${new Date(it.mod).toLocaleString(language === 'en' ? 'en-US' : 'pl-PL')}${it.updatedBy ? ` · ${t('Ostatnio edytował: {username}', { username: it.updatedBy })}` : ''}`}><PenLine size={12} className="text-indigo-400" /></span>}</div>
                     {(it.al || []).length > 0 && <div className="text-[10px] text-zinc-500" title={it.al.join(', ')}>{t('alias:')} {it.al[0]}{it.al.length > 1 ? ` +${it.al.length - 1}` : ''}</div>}
                   </td>
                   <td className="px-3 py-2 text-zinc-300 min-w-[260px]">
@@ -404,8 +392,8 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
                   <td className="px-3 py-2"><div className="flex flex-wrap gap-0.5">{(it.u || []).map(u => <Chip key={u}>{UL[u]}</Chip>)}</div></td>
                   <td className="px-3 py-2 whitespace-nowrap text-right">
                     <span className="inline-flex gap-1 opacity-40 group-hover:opacity-100 transition-opacity">
-                      <button onClick={e => { e.stopPropagation(); onEdit(k); }} title={t('Edytuj')} className="p-1.5 rounded-md text-zinc-400 hover:text-indigo-300 hover:bg-zinc-800"><Pencil size={13} /></button>
-                      <button onClick={e => { e.stopPropagation(); onDelete(k); }} title={t('Usuń')} className="p-1.5 rounded-md text-zinc-400 hover:text-red-300 hover:bg-red-500/10"><Trash2 size={13} /></button>
+                      <button onClick={e => { e.stopPropagation(); onEdit(k, it); }} title={t('Edytuj')} className="p-1.5 rounded-md text-zinc-400 hover:text-indigo-300 hover:bg-zinc-800"><Pencil size={13} /></button>
+                      <button onClick={e => { e.stopPropagation(); onDelete(k, it); }} title={t('Usuń')} className="p-1.5 rounded-md text-zinc-400 hover:text-red-300 hover:bg-red-500/10"><Trash2 size={13} /></button>
                     </span>
                   </td>
                 </tr>
@@ -420,7 +408,7 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
           </table>
         </div>
         <div className="flex items-center justify-between px-3 py-2 border-t border-zinc-800 bg-zinc-950/40 text-xs text-zinc-500">
-          <span>{filtered.length ? `${p * PER + 1}–${Math.min(filtered.length, (p + 1) * PER)} ${t('z')} ${filtered.length}` : '0'}{filtered.length !== rows.length && <> ({t('cała baza')}: {rows.length})</>}</span>
+          <span>{total ? `${p * PER + 1}–${Math.min(total, (p + 1) * PER)} ${t('z')} ${total}` : '0'}</span>
           <div className="flex items-center gap-1">
             <button className={cx(btnGhost, 'px-2 py-1.5')} disabled={p === 0} onClick={() => setPage(p - 1)}><ChevronLeft size={14} /></button>
             <span className="px-2">{p + 1} / {pages}</span>
@@ -429,7 +417,7 @@ export default function DatabaseView({ db, onEdit, onDelete, onNew }) {
         </div>
       </section>
       </div>
-      {batchReportOpen && <BatchStatusReport db={db} onClose={() => setBatchReportOpen(false)} />}
+      {batchReportOpen && <BatchStatusReport onClose={() => setBatchReportOpen(false)} notify={notify} />}
     </div>
   );
 }

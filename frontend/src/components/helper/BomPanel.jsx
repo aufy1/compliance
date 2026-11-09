@@ -1,12 +1,13 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import { ChevronDown, ChevronRight, Play, FileSpreadsheet, Eraser, CheckCheck, Copy, Plus, Pencil, AlertTriangle, Info, Settings2 } from 'lucide-react';
 import RCDDB from '../../lib/rcddb.js';
 import { BY_ID, ALL } from '../../lib/substances.js';
-import { parseBom, analyse, bomReport, CRIT } from '../../lib/rcd.js';
+import { bomLookupTokens, parseBom, analyse, bomReport, CRIT } from '../../lib/rcd.js';
 import { SRCL, UL, cx, readBuf, copyText } from '../../lib/utils.js';
 import { Chip, SrcChip, Check, Modal } from '../ui/index.jsx';
 import { btnGhost, btnPrimary, btnSuccess, panel } from '../ui/styles.js';
 import { useI18n } from '../../lib/i18n-context.js';
+import { api } from '../../api.js';
 
 const BOMOPT = 'bomcheckRcdBomOpt_v1';
 const BOMOPEN = 'bomcheckRcdBomOpen';
@@ -19,11 +20,14 @@ const SRC_DESC = {
 };
 const shortName = id => (BY_ID[id] ? BY_ID[id].n.split(' – ')[0].split(' (')[0] : id);
 
-export default function BomPanel({ db, sel, onApply, onAddCrit, onEditRecord, onNewRecord, notify }) {
+export default function BomPanel({ sel, onApply, onAddCrit, onEditRecord, onNewRecord, notify }) {
   const { t, language } = useI18n();
   const [open, setOpen] = useState(() => localStorage.getItem(BOMOPEN) === '1');
   const [text, setText] = useState('');
   const [analysed, setAnalysed] = useState('');
+  const [matchedDb, setMatchedDb] = useState(null);
+  const [matching, setMatching] = useState(false);
+  const lookupSequence = useRef(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [opts, setOpts] = useState(() => {
     try { return { ...DEF_OPTS, ...JSON.parse(localStorage.getItem(BOMOPT) || '{}') }; } catch { return DEF_OPTS; }
@@ -31,9 +35,23 @@ export default function BomPanel({ db, sel, onApply, onAddCrit, onEditRecord, on
   useEffect(() => { localStorage.setItem(BOMOPT, JSON.stringify(opts)); }, [opts]);
   useEffect(() => { localStorage.setItem(BOMOPEN, open ? '1' : '0'); }, [open]);
 
-  const LOOK = useMemo(() => (db ? RCDDB.index(db) : null), [db]);
+  const lookupBom = async textToAnalyze => {
+    const sequence = ++lookupSequence.current;
+    setAnalysed(textToAnalyze);
+    setMatchedDb(null);
+    setMatching(true);
+    try {
+      const result = await api.lookupItems(bomLookupTokens(textToAnalyze));
+      if (sequence === lookupSequence.current) setMatchedDb(result);
+    } catch (error) {
+      if (sequence === lookupSequence.current) notify(error.message, 'error');
+    } finally {
+      if (sequence === lookupSequence.current) setMatching(false);
+    }
+  };
+  const LOOK = useMemo(() => (matchedDb ? RCDDB.index(matchedDb) : null), [matchedDb]);
   const P = useMemo(() => (analysed && LOOK ? parseBom(analysed, LOOK) : null), [analysed, LOOK]);
-  const A = useMemo(() => (P ? analyse(P, opts, db) : null), [P, opts, db]);
+  const A = useMemo(() => (P && matchedDb ? analyse(P, opts, matchedDb) : null), [P, opts, matchedDb]);
 
   const setOpt = (k, v) => setOpts(o => ({ ...o, [k]: v }));
   const toggleSrc = (s, on) => setOpts(o => ({ ...o, src: on ? [...new Set([...o.src, s])] : o.src.filter(x => x !== s) }));
@@ -53,10 +71,17 @@ export default function BomPanel({ db, sel, onApply, onAddCrit, onEditRecord, on
             .join('\n'),
         ).join('\n');
       } else t = RCDDB.decode(buf).replace(/[;,]/g, '\t');
-      setText(t); setAnalysed(t); setOpen(true);
+      setText(t); setOpen(true); await lookupBom(t);
     } catch (error) {
       notify(t('Nie udało się odczytać pliku BOM: {error}', { error: error.message }), 'error');
     }
+  };
+  const clearAnalysis = () => {
+    lookupSequence.current += 1;
+    setText('');
+    setAnalysed('');
+    setMatchedDb({ items: {} });
+    setMatching(false);
   };
 
   const ids = A ? Object.keys(A.agg).sort((a, b) => ALL.indexOf(BY_ID[a]) - ALL.indexOf(BY_ID[b])) : [];
@@ -75,6 +100,7 @@ export default function BomPanel({ db, sel, onApply, onAddCrit, onEditRecord, on
           <Settings2 size={14} /> {t('Ustawienia')}
         </button>
         {A && !open && <span className="text-xs text-zinc-500">{t('ostatnia analiza: {found} rozpoznanych, {missing} spoza bazy', { found: P.found.length, missing: P.nf.length })}</span>}
+        {matching && <span className="text-xs text-indigo-300">{t('Wyszukiwanie ITEM w bazie…')}</span>}
       </div>
 
       {open && (
@@ -85,10 +111,10 @@ export default function BomPanel({ db, sel, onApply, onAddCrit, onEditRecord, on
               className="w-full h-44 font-mono text-xs bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
               placeholder={t('Wklej BOM z Excela (całe wiersze lub sama kolumna z numerami surowców).\nRozpoznaje ITEM, ITEM bez zer wiodących/separatorów oraz numery z EXTRA DESC (np. PHLP 12NC).\n\n0015 903\n0-0165536-1\n0051001')} />
             <div className="flex flex-wrap gap-2 items-center">
-              <button className={btnPrimary} onClick={() => setAnalysed(text)} disabled={!text.trim()}><Play size={14} /> {t('Analizuj BOM')}</button>
+              <button className={btnPrimary} onClick={() => { void lookupBom(text); }} disabled={!text.trim() || matching}><Play size={14} /> {t('Analizuj BOM')}</button>
               <label className={cx(btnGhost, 'cursor-pointer')}><FileSpreadsheet size={14} /> {t('Plik BOM (xlsx/csv)')}
                 <input type="file" accept=".xlsx,.xls,.csv,.txt" hidden onChange={onFile} /></label>
-              <button className={btnGhost} onClick={() => { setText(''); setAnalysed(''); }}><Eraser size={14} /> {t('Wyczyść')}</button>
+              <button className={btnGhost} onClick={clearAnalysis}><Eraser size={14} /> {t('Wyczyść')}</button>
             </div>
           </div>
 

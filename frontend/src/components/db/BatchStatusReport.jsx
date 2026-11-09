@@ -1,11 +1,12 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { FileJson, FileSpreadsheet, Printer, Search } from 'lucide-react';
 import RCDDB from '../../lib/rcddb.js';
-import { parseBom, reachLabel } from '../../lib/rcd.js';
+import { bomLookupTokens, parseBom, reachLabel } from '../../lib/rcd.js';
 import { BY_ID } from '../../lib/substances.js';
 import { Check, Modal } from '../ui/index.jsx';
 import { btnGhost, btnPrimary, input } from '../ui/styles.js';
 import { useI18n } from '../../lib/i18n-context.js';
+import { api } from '../../api.js';
 
 const FIELDS = [
   { key: 'reach', label: 'REACH status' },
@@ -65,22 +66,39 @@ function escapeHtml(value) {
   })[char]);
 }
 
-export default function BatchStatusReport({ db, onClose }) {
+export default function BatchStatusReport({ onClose, notify }) {
   const { t, language } = useI18n();
   const [text, setText] = useState('');
   const [analysedText, setAnalysedText] = useState('');
+  const [matchedDb, setMatchedDb] = useState(null);
+  const [matching, setMatching] = useState(false);
+  const lookupSequence = useRef(0);
   const [includeBomStructure, setIncludeBomStructure] = useState(true);
   const [skipDuplicates, setSkipDuplicates] = useState(true);
   const [includeReachVersion, setIncludeReachVersion] = useState(true);
   const [selected, setSelected] = useState(() => Object.fromEntries(FIELDS.map(({ key }) => [key, true])));
+  const analyze = async () => {
+    const sequence = ++lookupSequence.current;
+    setAnalysedText(text);
+    setMatchedDb(null);
+    setMatching(true);
+    try {
+      const result = await api.lookupItems(bomLookupTokens(text));
+      if (sequence === lookupSequence.current) setMatchedDb(result);
+    } catch (error) {
+      if (sequence === lookupSequence.current) notify(error.message, 'error');
+    } finally {
+      if (sequence === lookupSequence.current) setMatching(false);
+    }
+  };
   const parsed = useMemo(() => {
-    if (!analysedText.trim()) return null;
-    return parseBom(analysedText, RCDDB.index(db), { skipDuplicates });
-  }, [analysedText, db, skipDuplicates]);
+    if (!analysedText.trim() || !matchedDb) return null;
+    return parseBom(analysedText, RCDDB.index(matchedDb), { skipDuplicates });
+  }, [analysedText, matchedDb, skipDuplicates]);
   const rows = useMemo(() => {
     if (!parsed) return [];
-    return parsed.entries.map(record => reportRow(db, record, language, t, includeReachVersion));
-  }, [db, parsed, language, t, includeReachVersion]);
+    return parsed.entries.map(record => reportRow(matchedDb, record, language, t, includeReachVersion));
+  }, [matchedDb, parsed, language, t, includeReachVersion]);
   const columnKeys = [
     'ITEM',
     ...(includeBomStructure ? ['BOM level'] : []),
@@ -96,8 +114,6 @@ export default function BatchStatusReport({ db, onClose }) {
     ]),
   ));
   const toggleField = (key, checked) => setSelected(current => ({ ...current, [key]: checked }));
-  const analyze = () => setAnalysedText(text);
-
   const exportRows = reportRows;
   const downloadCsv = () => {
     const csvRows = [columns, ...exportRows().map(row => columns.map(column => row[column]))];
@@ -166,7 +182,7 @@ export default function BatchStatusReport({ db, onClose }) {
             className={`${input} h-32 resize-y font-mono`}
           />
           <button type="button" onClick={analyze} disabled={!text.trim()} className={`${btnPrimary} mt-2`}>
-            <Search size={14} /> {t('Analyze BOM')}
+            <Search size={14} /> {matching ? t('Analizowanie…') : t('Analyze BOM')}
           </button>
         </div>
 

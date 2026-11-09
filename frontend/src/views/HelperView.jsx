@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import { PRESETS } from '../lib/substances.js';
-import { countHits } from '../lib/rcd.js';
 import { cx } from '../lib/utils.js';
 import { panel, input } from '../components/ui/styles.js';
 import BomPanel from '../components/helper/BomPanel.jsx';
 import SubstanceList from '../components/helper/SubstanceList.jsx';
 import Generator from '../components/helper/Generator.jsx';
 import { useI18n } from '../lib/i18n-context.js';
+import { api } from '../api.js';
 
 const LS = 'bomcheckRcdHelper_v11';
 const PRESET_BTNS = [
@@ -18,13 +18,20 @@ const PRESET_BTNS = [
 ];
 const load = () => { try { return JSON.parse(localStorage.getItem(LS) || '{}'); } catch { return {}; } };
 
-export default function HelperView({ db, onEditRecord, onNewRecord, notify }) {
+export default function HelperView({ onEditRecord, onNewRecord, notify }) {
   const { t } = useI18n();
   const [sel, setSel] = useState(() => new Set(load().sel || []));
   const [bomBy, setBomBy] = useState(() => load().bom || {});
   const [search, setSearch] = useState('');
+  const [counts, setCounts] = useState({});
   const groupsRef = useRef(null);
-  const counts = useMemo(() => countHits(db), [db]);
+  useEffect(() => {
+    let active = true;
+    api.itemCounts()
+      .then(result => { if (active) setCounts(result.counts); })
+      .catch(error => { if (active) notify(error.message, 'error'); });
+    return () => { active = false; };
+  }, [notify]);
 
   useEffect(() => {
     const bom = Object.fromEntries(Object.entries(bomBy).filter(([k]) => sel.has(k)));
@@ -47,7 +54,7 @@ export default function HelperView({ db, onEditRecord, onNewRecord, notify }) {
 
   return (
     <div className="max-w-[1600px] mx-auto p-4 md:p-6 space-y-4">
-      <BomPanel db={db} sel={sel} onApply={applyBom} onAddCrit={addCrit} onEditRecord={onEditRecord} onNewRecord={onNewRecord} notify={notify} />
+      <BomPanel sel={sel} onApply={applyBom} onAddCrit={addCrit} onEditRecord={onEditRecord} onNewRecord={onNewRecord} notify={notify} />
 
       <section ref={groupsRef} className={cx(panel, 'p-3 flex flex-wrap gap-2 items-center scroll-mt-4')}>
         <span className="text-xs font-semibold text-zinc-400 mr-1 uppercase tracking-wider">{t('Profil')}</span>
